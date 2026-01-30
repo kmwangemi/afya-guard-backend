@@ -1,15 +1,33 @@
-from typing import Union
-
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+
+from src.api.v1.database import Base, engine
+from src.api.v1.routes.claim_route import claim_router
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
+# CORS Configuration
+origins = [
+    "http://localhost:3000",
+]  # Add frontend domains here
 
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: Union[str, None] = None):
-    return {"item_id": item_id, "q": q}
+# API Prefixes
+BASE_URL_PREFIX = "/api/v1"
+# Include API Routes
+app.include_router(
+    claim_router,
+    prefix=f"{BASE_URL_PREFIX}",
+    tags=["Claims"],
+)
