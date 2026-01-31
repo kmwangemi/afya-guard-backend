@@ -81,7 +81,7 @@ async def get_claim(
 async def get_all_claims(
     db: DbDependency,
 ):
-    stmt = select(Claim)
+    stmt = select(Claim).order_by(Claim.created_at.desc())
     result = await db.execute(stmt)  # 👈 await FIRST
     claims = result.scalars().all()  # 👈 then call scalars()
     return claims
