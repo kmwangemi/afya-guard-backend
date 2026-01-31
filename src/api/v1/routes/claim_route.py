@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.v1.database import get_db
 from src.api.v1.models.claim_model import Claim
@@ -11,7 +11,7 @@ from src.api.v1.schemas.claim_schema import ClaimCreate, ClaimResponse, ClaimUpd
 
 claim_router = APIRouter()
 
-DbDependency = Annotated[Session, Depends(get_db)]
+DbDependency = Annotated[AsyncSession, Depends(get_db)]
 
 
 @claim_router.post(
@@ -22,6 +22,15 @@ async def create_claim(
     db: DbDependency,
 ):
     try:
+        # 🔍 Check if claim_number already exists
+        stmt = select(Claim).where(Claim.claim_number == claim_data.claim_number)
+        existing_claim = (await db.execute(stmt)).scalar_one_or_none()
+        if existing_claim:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Claim with this claim number already exists.",
+            )
+        # ✅ Create new claim
         new_claim = Claim(
             claim_number=claim_data.claim_number,
             patient_national_id=claim_data.patient_national_id,
@@ -33,11 +42,11 @@ async def create_claim(
             submission_date=claim_data.submission_date,
         )
         db.add(new_claim)
-        db.commit()
-        db.refresh(new_claim)
+        await db.commit()
+        await db.refresh(new_claim)
         return new_claim
     except SQLAlchemyError as e:
-        db.rollback()
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create claim.",
@@ -54,13 +63,14 @@ async def get_claim(
     db: DbDependency,
 ):
     stmt = select(Claim).where(Claim.id == claim_id)
-    result = db.execute(stmt).scalar_one_or_none()
-    if not result:
+    result = await db.execute(stmt)  # 👈 await FIRST
+    claim = result.scalar_one_or_none()  # 👈 then call scalar()
+    if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Claim not found.",
         )
-    return result
+    return claim
 
 
 @claim_router.get(
@@ -72,11 +82,12 @@ async def get_all_claims(
     db: DbDependency,
 ):
     stmt = select(Claim)
-    results = db.execute(stmt).scalars().all()
-    return results
+    result = await db.execute(stmt)  # 👈 await FIRST
+    claims = result.scalars().all()  # 👈 then call scalars()
+    return claims
 
 
-@claim_router.put(
+@claim_router.patch(
     "/claims/{claim_id}",
     response_model=ClaimResponse,
     status_code=status.HTTP_200_OK,
@@ -87,7 +98,8 @@ async def update_claim(
     db: DbDependency,
 ):
     stmt = select(Claim).where(Claim.id == claim_id)
-    claim = db.execute(stmt).scalar_one_or_none()
+    result = await db.execute(stmt)
+    claim = result.scalar_one_or_none()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -96,11 +108,11 @@ async def update_claim(
     try:
         for field, value in claim_data.model_dump(exclude_unset=True).items():
             setattr(claim, field, value)
-        db.commit()
-        db.refresh(claim)
+        await db.commit()
+        await db.refresh(claim)
         return claim
     except SQLAlchemyError as e:
-        db.rollback()
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update claim.",
@@ -116,18 +128,19 @@ async def delete_claim(
     db: DbDependency,
 ):
     stmt = select(Claim).where(Claim.id == claim_id)
-    claim = db.execute(stmt).scalar_one_or_none()
+    result = await db.execute(stmt)
+    claim = result.scalar_one_or_none()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Claim not found.",
         )
     try:
-        db.delete(claim)
-        db.commit()
+        await db.delete(claim)
+        await db.commit()
         return None
     except SQLAlchemyError as e:
-        db.rollback()
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete claim.",
