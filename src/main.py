@@ -1,12 +1,12 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from contextlib import asynccontextmanager
-from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
-from sqlalchemy.orm import selectinload
-
 from src.api.v1.database import Base, engine
-from src.api.v1.routes.claim_route import claim_router
+from src.api.v1.routers.claim_router import claim_router
+from src.api.v1.routers.auth_router import auth_router
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -16,6 +16,7 @@ async def lifespan(_app: FastAPI):
     yield
     # Shutdown: drop database tables (optional)
     await engine.dispose()
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -27,7 +28,7 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,
+    allow_credentials=True,  
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -40,4 +41,9 @@ app.include_router(
     claim_router,
     prefix=f"{BASE_URL_PREFIX}",
     tags=["Claims"],
+)
+app.include_router(
+    auth_router,
+    prefix=f"{BASE_URL_PREFIX}",
+    tags=["Users - Authentication"],
 )
