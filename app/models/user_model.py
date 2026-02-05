@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy import DateTime, Enum, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from src.api.v1.database import Base
+from app.core.database import Base
 
 
 class UserRole(str, PyEnum):
