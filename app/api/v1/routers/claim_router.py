@@ -5,9 +5,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.v1.database import get_db
-from src.api.v1.models.claim_model import Claim
-from src.api.v1.schemas.claim_schema import ClaimCreate, ClaimResponse, ClaimUpdate
+from app.core.database import get_db
+from app.models.claim_model import Claim
+from app.schemas.claim_schema import ClaimCreate, ClaimResponse, ClaimUpdate
 
 claim_router = APIRouter()
 

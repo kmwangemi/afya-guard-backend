@@ -6,7 +6,7 @@ from typing import Any, Optional
 from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from src.api.v1.database import Base
+from app.core.database import Base
 
 
 class Claim(Base):

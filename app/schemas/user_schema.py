@@ -3,7 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from src.api.v1.models.user_model import UserRole
+from app.models.user_model import UserRole
 
 
 # =========================

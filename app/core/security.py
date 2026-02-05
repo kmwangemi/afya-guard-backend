@@ -8,10 +8,10 @@ from pwdlib import PasswordHash
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from src.api.v1.config import settings
-from src.api.v1.database import get_db
-from src.api.v1.models.user_model import User
-from src.api.v1.schemas.user_schema import UserResponse
+from app.core.config import settings
+from app.core.database import get_db
+from app.models.user_model import User
+from app.schemas.user_schema import UserResponse
 
 password_hash = PasswordHash.recommended()
 

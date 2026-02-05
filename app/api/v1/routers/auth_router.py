@@ -15,13 +15,13 @@ from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from src.api.v1.config import settings
-from src.api.v1.database import get_db
-from src.api.v1.models.user_model import User
-from src.api.v1.schemas.user_schema import TokenResponse
+from app.core.config import settings
+from app.core.database import get_db
+from app.models.user_model import User
+from app.schemas.user_schema import TokenResponse
 
 # from src.rate_limiter import limiter
-from src.api.v1.utils.auth import create_access_token, verify_password
+from app.core.security import create_access_token, verify_password
 
 # Constants
 # EMAIL_CONFIRMATION_URL = (
