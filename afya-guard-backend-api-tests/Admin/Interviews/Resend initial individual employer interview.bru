@@ -1,0 +1,15 @@
+meta {
+  name: Resend initial individual employer interview
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{local_url}}/employer/interviews/cb49d659-b683-4c10-a363-2143777b0074/resend-email
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

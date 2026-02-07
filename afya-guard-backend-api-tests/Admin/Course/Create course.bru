@@ -1,0 +1,24 @@
+meta {
+  name: Create course
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{local_url}}/admin/courses
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "title": "work place ethics & integrity",
+    "category": "work ethics & integrity",
+    "description": "a course on work ethics & integrity",
+    "image_url": "https://res.cloudinary.com/dsaskhtcf/image/upload/v1761055078/apex/files/file_sxueeu.png"
+  }
+}

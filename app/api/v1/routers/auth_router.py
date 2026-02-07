@@ -10,6 +10,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError
 
 # from jinja2 import Template
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,11 +18,11 @@ from sqlalchemy.future import select
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.user_model import User
-from app.schemas.user_schema import TokenResponse
 
 # from src.rate_limiter import limiter
-from app.core.security import create_access_token, verify_password
+from app.core.security import create_access_token, hash_password, verify_password
+from app.models.user_model import User
+from app.schemas.user_schema import TokenResponse, UserCreate, UserResponse
 
 # Constants
 # EMAIL_CONFIRMATION_URL = (
@@ -120,7 +121,6 @@ async def login(
     form_data: FormData,
     db: DbDependency,
 ):
-
     # Lookup user by email (case-insensitive)
     # Note: OAuth2PasswordRequestForm uses "username" field, but we treat it as email
     result = await db.execute(
@@ -149,93 +149,53 @@ async def login(
     )
 
 
-# @user_auth_router.post("/logout", response_model=LogoutResponse)
-# async def logout(
-#     request: Request,
-#     response: Response,
-#     db: DbDependency,
-# ):
-#     try:
-#         token = request.cookies.get("access_token")
-#         if token is None:
-#             util.set_error(
-#                 "Account is not logged in",
-#                 "Unauthorized",
-#                 401,
-#             )
-#             return util.send()
-
-#         response.delete_cookie(
-#             key="access_token",
-#             httponly=True,
-#             secure=True,
-#             samesite="none",
-#         )
-#         return {
-#             "message": "Successfully logged out",
-#         }
-#     except Exception as e:
-#         logging.error("Database error occurred: %s", str(e))
-#         util.set_error(
-#             f"Database error occurred: {str(e)}", "Internal Server Error", 500
-#         )
-#         return util.send()
-
-
-# @user_auth_router.post("/registration", response_model=UserResponse)
-# # @limiter.limit("5/hour")
-# async def create_user(
-#     request: Request, register_user_request: JobseekerCreate, db: DbDependency
-# ):
-#     try:
-#         await db.begin()  # ✅ Start transaction manually
-#         # Check if email already exists
-#         email_result = await db.execute(
-#             select(User).filter(User.email == register_user_request.email)
-#         )
-#         existing_email = email_result.scalars().first()
-#         if existing_email:
-#             util.set_error("A user with the email already exists.", "Bad Request", 400)
-#             return util.send()
-#         # Create new user
-#         new_user = User(
-#             first_name=register_user_request.first_name,
-#             last_name=register_user_request.last_name,
-#             phone_number=register_user_request.phone_number,
-#             email=register_user_request.email,
-#             hashed_password=hash_password(register_user_request.password),
-#             role="jobseeker",
-#         )
-#         db.add(new_user)
-#         await db.flush()  # ✅ Flush to get new_user.id without committing
-#         # ✅ Check role and create associated model
-#         new_jobseeker = JobSeeker(user_id=new_user.id)
-#         db.add(new_jobseeker)
-#         # ✅ Manually commit if everything is successful
-#         await db.commit()
-#         # ✅ Now send email (since commit was successful)
-#         email_sent = await send_verification_email(new_user)
-#         if not email_sent:
-#             logging.warning("Failed to send verification email to %s", new_user.email)
-#         # Exclude fields manually
-#         excluded_fields = {"hashed_password"}
-#         user_data = {
-#             key: value
-#             for key, value in new_user.__dict__.items()
-#             if key not in excluded_fields and not key.startswith("_")
-#         }
-#         util.set_success("User created successfully", "Created", 201, user_data)
-#         return util.send()
-#     except ValueError as e:
-#         await db.rollback()  # ✅ Rollback if anything fails
-#         logging.error("ValueError occurred: %s", str(e))
-#         util.set_error(f"Invalid input: {str(e)}", "Bad Request", 400)
-#         return util.send()
-#     except SQLAlchemyError as e:
-#         await db.rollback()  # ✅ Rollback database transaction
-#         logging.error("Database error occurred: %s", str(e))
-#         util.set_error(f"Database error: {str(e)}", "Internal Server Error", 500)
-#         return util.send()
+@auth_router.post("/registration", response_model=UserResponse)
+# @limiter.limit("5/hour")
+async def create_user(
+    # request: Request,
+    register_user_request: UserCreate,
+    db: DbDependency,
+):
+    try:
+        # Check if email already exists
+        email_result = await db.execute(
+            select(User).filter(User.email == register_user_request.email)
+        )
+        existing_email = email_result.scalars().first()
+        if existing_email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A user with the email already exists.",
+            )
+        # Create new user
+        new_user = User(
+            first_name=register_user_request.first_name,
+            last_name=register_user_request.last_name,
+            phone_number=register_user_request.phone_number,
+            email=register_user_request.email,
+            hashed_password=hash_password(register_user_request.password),
+            role=register_user_request.role,
+        )
+        db.add(new_user)
+        await db.commit()
+        await db.refresh(new_user)
+        return UserResponse(
+            id=new_user.id,
+            first_name=new_user.first_name,
+            last_name=new_user.last_name,
+            email=new_user.email,
+            phone_number=new_user.phone_number,
+            role=new_user.role,
+            profile_picture_url=new_user.profile_picture_url,
+            created_at=new_user.created_at,
+            updated_at=new_user.updated_at,
+        )
+    except SQLAlchemyError as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create claim.",
+        ) from e
 
 
 # @user_auth_router.post("/forgot-password", response_model=UserResponse)
@@ -443,4 +403,37 @@ async def login(
 #         await db.rollback()
 #         logging.error("Database error occurred: %s", str(e))
 #         util.set_error(f"Database error: {str(e)}", "Internal Server Error", 500)
+#         return util.send()
+
+
+# @user_auth_router.post("/logout", response_model=LogoutResponse)
+# async def logout(
+#     request: Request,
+#     response: Response,
+#     db: DbDependency,
+# ):
+#     try:
+#         token = request.cookies.get("access_token")
+#         if token is None:
+#             util.set_error(
+#                 "Account is not logged in",
+#                 "Unauthorized",
+#                 401,
+#             )
+#             return util.send()
+
+#         response.delete_cookie(
+#             key="access_token",
+#             httponly=True,
+#             secure=True,
+#             samesite="none",
+#         )
+#         return {
+#             "message": "Successfully logged out",
+#         }
+#     except Exception as e:
+#         logging.error("Database error occurred: %s", str(e))
+#         util.set_error(
+#             f"Database error occurred: {str(e)}", "Internal Server Error", 500
+#         )
 #         return util.send()

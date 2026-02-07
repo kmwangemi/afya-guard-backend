@@ -1,0 +1,15 @@
+meta {
+  name: Fetch interview statistics analytics
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{prod_url}}/employer/dashboard/interviews/statistics
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

@@ -1,0 +1,26 @@
+meta {
+  name: Registration
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{local_url}}/registration
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "first_name": "kelvin",
+    "last_name": "mwangemi",
+    "email": "mwas@gmail.com",
+    "phone_number": "+254706612436",
+    "password": "Admin@123",
+    "role": "admin"
+  }
+}

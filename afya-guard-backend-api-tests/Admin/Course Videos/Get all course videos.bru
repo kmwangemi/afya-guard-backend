@@ -1,0 +1,20 @@
+meta {
+  name: Get all course videos
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{local_url}}/admin/courses/480753e3-1a53-4499-9bf2-aecb722585f9/questions?page=1&page_size=10
+  body: none
+  auth: bearer
+}
+
+params:query {
+  page: 1
+  page_size: 10
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

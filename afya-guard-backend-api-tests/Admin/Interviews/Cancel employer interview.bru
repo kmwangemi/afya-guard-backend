@@ -1,0 +1,23 @@
+meta {
+  name: Cancel employer interview
+  type: http
+  seq: 5
+}
+
+patch {
+  url: {{local_url}}/employer/interviews/reschedule_cancel/b7edd163-8dcb-4c32-99cb-0e9e985e7d95
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "subject": "interview cancelled",
+    "message": "message cancelled job interview",
+    "status": "cancelled"
+  }
+}

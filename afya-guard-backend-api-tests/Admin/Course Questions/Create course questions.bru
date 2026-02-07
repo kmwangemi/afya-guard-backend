@@ -1,0 +1,43 @@
+meta {
+  name: Create course questions
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{local_url}}/admin/courses/480753e3-1a53-4499-9bf2-aecb722585f9/questions
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "question": "how do you take safety",
+    "answers": [
+      {
+        "text": "sit down",
+        "is_correct": false
+      },
+      {
+        "text": "relax",
+        "is_correct": true
+      },
+      {
+        "text": "run away",
+        "is_correct": false
+      },
+      {
+        "text": "cool down",
+        "is_correct": false
+      },
+      {
+        "text": "cry",
+        "is_correct": false
+      }
+    ]
+  }
+}

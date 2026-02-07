@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -85,7 +86,7 @@ class TokenResponse(BaseModel):
 class UserResponse(UserBase):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
+    id: UUID
     profile_picture_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime

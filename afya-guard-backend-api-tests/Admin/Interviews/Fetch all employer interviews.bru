@@ -1,0 +1,21 @@
+meta {
+  name: Fetch all employer interviews
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{local_url}}/employer/interviews
+  body: none
+  auth: bearer
+}
+
+params:query {
+  ~pageNumber: 1
+  ~activeTab: all
+  ~query: stanley
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

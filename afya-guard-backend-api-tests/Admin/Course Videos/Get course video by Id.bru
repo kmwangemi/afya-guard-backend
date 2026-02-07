@@ -1,0 +1,15 @@
+meta {
+  name: Get course video by Id
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{local_url}}/admin/questions/6d729f4f-b492-437d-b15d-bedf65e3748a
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

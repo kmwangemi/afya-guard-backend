@@ -1,0 +1,15 @@
+meta {
+  name: Get course by Id
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{local_url}}/admin/courses/480753e3-1a53-4499-9bf2-aecb722585f9
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

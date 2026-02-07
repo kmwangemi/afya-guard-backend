@@ -1,0 +1,19 @@
+meta {
+  name: Hard delete course with related data
+  type: http
+  seq: 7
+}
+
+delete {
+  url: {{local_url}}/admin/courses/d1999519-9f87-4c99-b51c-9360c9376dbb/hard-delete?confirm=true
+  body: none
+  auth: bearer
+}
+
+params:query {
+  confirm: true
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
