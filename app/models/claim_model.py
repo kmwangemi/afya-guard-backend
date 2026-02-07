@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any, Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, String
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -12,7 +14,13 @@ from app.core.database import Base
 class Claim(Base):
     __tablename__ = "claims"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        unique=True,
+        nullable=False,
+    )
     claim_number: Mapped[str] = mapped_column(String, unique=True, index=True)
     patient_national_id: Mapped[str] = mapped_column(String, index=True)
     provider_id: Mapped[str] = mapped_column(String, index=True)
@@ -40,3 +48,6 @@ class Claim(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+    
+    def __repr__(self) -> str:
+        return f"<Claim(id={self.id}, claim_number={self.claim_number}, risk_score={self.risk_score}, is_flagged={self.is_flagged})>"

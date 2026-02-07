@@ -1,0 +1,15 @@
+meta {
+  name: Fetch dashboard overview analytics
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{prod_url}}/employer/dashboard/overview
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

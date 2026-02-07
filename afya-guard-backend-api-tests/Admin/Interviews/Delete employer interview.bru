@@ -1,0 +1,15 @@
+meta {
+  name: Delete employer interview
+  type: http
+  seq: 6
+}
+
+delete {
+  url: {{local_url}}/employer/interviews/68401d2789c0611ef6c3325c
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

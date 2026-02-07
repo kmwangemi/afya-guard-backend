@@ -1,0 +1,15 @@
+meta {
+  name: Delete course question
+  type: http
+  seq: 4
+}
+
+delete {
+  url: {{local_url}}/admin/courses/83a2baef-32ba-4b9e-a165-5392306caec1
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

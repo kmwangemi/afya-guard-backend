@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "name": "afya-guard-backend-api-tests",
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ]
+}

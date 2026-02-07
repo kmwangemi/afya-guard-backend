@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any, List, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -84,7 +85,7 @@ class ClaimUpdate(BaseModel):
 class ClaimResponse(ClaimBase):
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
+    id: UUID
     risk_score: float
     is_flagged: bool
     fraud_flags: Optional[List[Any]] = None

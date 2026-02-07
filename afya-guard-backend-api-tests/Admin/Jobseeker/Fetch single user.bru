@@ -1,0 +1,15 @@
+meta {
+  name: Fetch single user
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{mmi_prod_url}}/admin/users/67d01a3dee7fe138637a4419
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

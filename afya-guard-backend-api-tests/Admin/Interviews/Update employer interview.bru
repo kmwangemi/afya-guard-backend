@@ -1,0 +1,28 @@
+meta {
+  name: Update employer interview
+  type: http
+  seq: 3
+}
+
+patch {
+  url: {{local_url}}/employer/interviews/b7edd163-8dcb-4c32-99cb-0e9e985e7d95
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "status": "completed",
+    "notes": "Improve on your communication skills updated",
+    "rating": 2
+  }
+  
+  
+  
+  // InterviewStatus = "pending", "confirmed", "declined", 
+  // "completed", "cancelled", "rescheduled"
+}

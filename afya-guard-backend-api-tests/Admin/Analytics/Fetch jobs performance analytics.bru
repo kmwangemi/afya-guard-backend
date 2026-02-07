@@ -1,0 +1,15 @@
+meta {
+  name: Fetch jobs performance analytics
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{prod_url}}/employer/dashboard/jobs/performance
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}

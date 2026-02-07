@@ -1,0 +1,26 @@
+meta {
+  name: Send initial individual employer interview
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{local_url}}/employer/interviews/individual
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "jobseeker_ids": [
+      "3215f81a-314f-4c22-a89f-a449418d42f1"
+    ],
+    "job_id": "9f94273e-b434-46cc-96b6-d05a48ffb5d2",
+    "subject": "interview invitation",
+    "message": "message invitation job interview"
+  }
+}

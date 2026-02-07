@@ -1,0 +1,24 @@
+meta {
+  name: Update course video
+  type: http
+  seq: 3
+}
+
+patch {
+  url: {{local_url}}/admin/courses/480753e3-1a53-4499-9bf2-aecb722585f9
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+    "title": "work place ethics & integrity updated",
+    "category": "work ethics & integrity updated",
+    "description": "a course on work ethics & integrity updated",
+    "image_url": "https://course_image_url_updated"
+  }
+}

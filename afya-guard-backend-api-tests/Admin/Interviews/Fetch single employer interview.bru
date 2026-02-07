@@ -1,0 +1,15 @@
+meta {
+  name: Fetch single employer interview
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{local_url}}/employer/interviews/b7edd163-8dcb-4c32-99cb-0e9e985e7d95
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
