@@ -13,9 +13,9 @@ from app.core.database import Base
 
 
 class UserRole(str, PyEnum):
-    ADMIN = "admin"
-    INVESTIGATOR = "investigator"
-    ANALYST = "analyst"
+    ADMIN = "ADMIN"
+    INVESTIGATOR = "INVESTIGATOR"
+    ANALYST = "ANALYST"
 
 
 class User(Base):
@@ -45,6 +45,7 @@ class User(Base):
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, name="userrole", create_constraint=True, validate_strings=True),
         nullable=False,
+        default=UserRole.ANALYST,
     )
     profile_picture_url: Mapped[Optional[str]] = mapped_column(
         String(500), nullable=True
