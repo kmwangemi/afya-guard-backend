@@ -1,34 +1,27 @@
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.database import Base, engine
-from app.api.v1.routers.claim_router import claim_router
 from app.api.v1.routers.auth_router import auth_router
+from app.api.v1.routers.claim_router import claim_router
 
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    # Startup: create database tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-    # Shutdown: drop database tables (optional)
-    await engine.dispose()
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    title="Afya Guard API",
+    version="0.1.0",
+    description="API for Afya Guide application",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 # CORS Configuration
 origins = [
     "http://localhost:3000",
+    "https://afya-guard-frontend.vercel.app",
 ]  # Add frontend domains here
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,  
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

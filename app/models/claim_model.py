@@ -48,6 +48,6 @@ class Claim(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
-    
+
     def __repr__(self) -> str:
         return f"<Claim(id={self.id}, claim_number={self.claim_number}, risk_score={self.risk_score}, is_flagged={self.is_flagged})>"
