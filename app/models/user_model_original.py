@@ -1,21 +1,24 @@
+from __future__ import annotations
+
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, List, Optional
+from enum import Enum as PyEnum
+from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import DateTime, Enum, String
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
-if TYPE_CHECKING:
-    from app.models.fraud_alert_model import FraudAlert
-    from app.models.investigation_model import Investigation
+
+class UserRole(str, PyEnum):
+    ADMIN = "ADMIN"
+    INVESTIGATOR = "INVESTIGATOR"
+    ANALYST = "ANALYST"
 
 
 class User(Base):
-    """SHA System Users (Investigators, Admins)"""
-
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -25,25 +28,28 @@ class User(Base):
         unique=True,
         nullable=False,
     )
-    email: Mapped[str] = mapped_column(
-        String(255), unique=True, index=True, nullable=False
-    )
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    email: Mapped[str] = mapped_column(
+        String(100),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
     phone_number: Mapped[str] = mapped_column(
         String(20),
         index=True,
         nullable=False,
     )
-    role: Mapped[str] = mapped_column(
-        String(50), default="investigator"
-    )  # admin, investigator, analyst
+    hashed_password: Mapped[str] = mapped_column(String(355), nullable=False)
+    role: Mapped[UserRole] = mapped_column(
+        Enum(UserRole, name="userrole", create_constraint=True, validate_strings=True),
+        nullable=False,
+        default=UserRole.ANALYST,
+    )
     profile_picture_url: Mapped[Optional[str]] = mapped_column(
         String(500), nullable=True
     )
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_on_duty: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
@@ -51,14 +57,6 @@ class User(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
-    )
-
-    # Relationships
-    assigned_alerts: Mapped[List["FraudAlert"]] = relationship(
-        "FraudAlert", back_populates="assigned_to_user"
-    )
-    investigations: Mapped[List["Investigation"]] = relationship(
-        "Investigation", back_populates="investigator"
     )
 
     def __repr__(self) -> str:

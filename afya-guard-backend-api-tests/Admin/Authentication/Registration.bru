@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{local_url}}/registration
+  url: {{prod_url}}/registration
   body: json
   auth: bearer
 }
@@ -21,6 +21,6 @@ body:json {
     "email": "mwas@gmail.com",
     "phone_number": "+254706612436",
     "password": "Admin@123",
-    "role": "admin"
+    "role": "ADMIN"
   }
 }
