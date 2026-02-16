@@ -26,11 +26,11 @@ class Investigation(Base):
         unique=True,
         nullable=False,
     )
-    alert_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("fraud_alerts.id"), unique=True
+    alert_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fraud_alerts.id"), nullable=False
     )
-    investigator_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("users.id")
+    investigator_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
     # Investigation Details
     investigation_number: Mapped[Optional[str]] = mapped_column(

@@ -21,8 +21,8 @@ class AuditLog(Base):
         unique=True,
         nullable=False,
     )
-    user_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("users.id"), nullable=True
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
     action: Mapped[Optional[str]] = mapped_column(
         String(100), index=True

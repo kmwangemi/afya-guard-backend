@@ -1,8 +1,17 @@
-
 import enum
+
+
+class UserRole(str, enum.Enum):
+    """User roles in the system"""
+
+    ADMIN = "admin"
+    INVESTIGATOR = "investigator"
+    ANALYST = "analyst"
+
 
 class ClaimStatus(str, enum.Enum):
     """Claim processing status"""
+
     PENDING = "pending"
     PROCESSING = "processing"
     AUTO_APPROVED = "auto_approved"
@@ -15,6 +24,7 @@ class ClaimStatus(str, enum.Enum):
 
 class FraudSeverity(str, enum.Enum):
     """Fraud flag severity levels"""
+
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
@@ -23,6 +33,7 @@ class FraudSeverity(str, enum.Enum):
 
 class VisitType(str, enum.Enum):
     """Type of patient visit"""
+
     INPATIENT = "inpatient"
     OUTPATIENT = "outpatient"
     DAYCARE = "daycare"
@@ -30,6 +41,7 @@ class VisitType(str, enum.Enum):
 
 class PatientDisposition(str, enum.Enum):
     """Patient outcome upon discharge"""
+
     IMPROVED = "improved"
     RECOVERED = "recovered"
     LAMA = "leave_against_medical_advice"  # LAMA

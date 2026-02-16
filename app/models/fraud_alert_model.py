@@ -39,7 +39,9 @@ class FraudAlert(Base):
         unique=True,
         nullable=False,
     )
-    claim_id: Mapped[int] = mapped_column(Integer, ForeignKey("claims.id"), index=True)
+    claim_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("claims.id"), nullable=False
+    )
     # Alert Details
     alert_type: Mapped[Optional[str]] = mapped_column(
         String(100), index=True
@@ -59,8 +61,8 @@ class FraudAlert(Base):
         Float
     )  # Confidence score from ML models
     # Assignment
-    assigned_to: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("users.id"), nullable=True
+    assigned_to: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
     status: Mapped[str] = mapped_column(
         String(50), default="open", index=True

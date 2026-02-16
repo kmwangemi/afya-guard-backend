@@ -3,9 +3,18 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, List, Optional
 
-from sqlalchemy import JSON, Boolean, DateTime
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+)
 from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import Float, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -35,13 +44,13 @@ class Claim(Base):
         String(50), unique=True, index=True, nullable=False
     )
     # Provider Information
-    provider_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("providers.id"), index=True
+    provider_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("providers.id"), index=True
     )
     provider_code: Mapped[Optional[str]] = mapped_column(String(50), index=True)
     # Patient Information
-    patient_id: Mapped[Optional[int]] = mapped_column(
-        Integer, ForeignKey("patients.id"), index=True, nullable=True
+    patient_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("patients.id"), nullable=True
     )
     patient_national_id: Mapped[Optional[str]] = mapped_column(
         String(20), index=True
@@ -110,7 +119,9 @@ class Claim(Base):
         SQLEnum(ClaimStatus), default=ClaimStatus.PENDING, index=True
     )
     processing_notes: Mapped[Optional[str]] = mapped_column(Text)
-    approved_by: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
+    approved_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     rejection_reason: Mapped[Optional[str]] = mapped_column(Text)
     # Timestamps

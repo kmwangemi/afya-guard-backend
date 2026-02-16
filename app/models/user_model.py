@@ -3,10 +3,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, List, Optional
 
 from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+from app.models.enums_model import UserRole
 
 if TYPE_CHECKING:
     from app.models.fraud_alert_model import FraudAlert
@@ -14,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class User(Base):
-    """SHA System Users (Investigators, Admins)"""
+    """SHA System Users (Investigators, Admins, Analysts)"""
 
     __tablename__ = "users"
 
@@ -36,8 +38,8 @@ class User(Base):
         index=True,
         nullable=False,
     )
-    role: Mapped[str] = mapped_column(
-        String(50), default="investigator"
+    role: Mapped[UserRole] = mapped_column(
+        SQLEnum(UserRole), default=UserRole.INVESTIGATOR, index=True
     )  # admin, investigator, analyst
     profile_picture_url: Mapped[Optional[str]] = mapped_column(
         String(500), nullable=True
