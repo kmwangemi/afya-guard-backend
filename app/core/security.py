@@ -10,7 +10,7 @@ from sqlalchemy.future import select
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.user_model import User
+from app.models.user_model_original import User
 from app.schemas.user_schema import UserResponse
 
 password_hash = PasswordHash.recommended()

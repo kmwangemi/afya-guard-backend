@@ -21,7 +21,7 @@ from app.core.database import get_db
 
 # from src.rate_limiter import limiter
 from app.core.security import create_access_token, hash_password, verify_password
-from app.models.user_model import User
+from app.models.user_model_original import User
 from app.schemas.user_schema import TokenResponse, UserCreate, UserResponse
 
 # Constants
