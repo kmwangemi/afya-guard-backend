@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.models.user_model_original import UserRole
+from app.models.enums_model import UserRole
 
 
 # =========================

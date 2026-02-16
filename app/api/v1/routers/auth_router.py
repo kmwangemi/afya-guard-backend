@@ -21,7 +21,7 @@ from app.core.database import get_db
 
 # from src.rate_limiter import limiter
 from app.core.security import create_access_token, hash_password, verify_password
-from app.models.user_model_original import User
+from app.models.user_model import User
 from app.schemas.user_schema import TokenResponse, UserCreate, UserResponse
 
 # Constants
@@ -165,7 +165,7 @@ async def create_user(
         if existing_email:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="A user with the email already exists.",
+                detail="A user with this email already exists.",
             )
         # Create new user
         new_user = User(
@@ -175,6 +175,8 @@ async def create_user(
             email=register_user_request.email,
             hashed_password=hash_password(register_user_request.password),
             role=register_user_request.role,
+            is_active=True,  # New users are active by default
+            is_on_duty=False,  # New users are not on duty by default
         )
         db.add(new_user)
         await db.commit()
@@ -194,7 +196,7 @@ async def create_user(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create claim.",
+            detail="Failed to create user.",  # Fixed error message
         ) from e
 
 
