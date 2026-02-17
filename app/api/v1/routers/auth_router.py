@@ -162,6 +162,7 @@ async def create_user(
             select(User).filter(User.email == register_user_request.email)
         )
         existing_email = email_result.scalars().first()
+        print("email--->", existing_email)
         if existing_email:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -196,7 +197,8 @@ async def create_user(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create user.",  # Fixed error message
+            detail="Failed to create user.",
+            # detail=str(e),  # temporarily show real error
         ) from e
 
 

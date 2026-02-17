@@ -2,8 +2,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Boolean, DateTime
 from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -11,6 +12,7 @@ from app.core.database import Base
 from app.models.enums_model import UserRole
 
 if TYPE_CHECKING:
+    from app.models.claim_model import Claim
     from app.models.fraud_alert_model import FraudAlert
     from app.models.investigation_model import Investigation
 
@@ -61,6 +63,9 @@ class User(Base):
     )
     investigations: Mapped[List["Investigation"]] = relationship(
         "Investigation", back_populates="investigator"
+    )
+    approved_claims: Mapped[List["Claim"]] = relationship(
+        "Claim", back_populates="approved_by_user", foreign_keys="Claim.approved_by"
     )
 
     def __repr__(self) -> str:
