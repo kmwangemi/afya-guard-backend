@@ -75,11 +75,6 @@ class UserUpdate(BaseModel):
         return value.strip().title() if isinstance(value, str) else value
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
 # =========================
 # Response schema
 # =========================
@@ -90,3 +85,9 @@ class UserResponse(UserBase):
     profile_picture_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+class TokenResponse(BaseModel):
+    token: str
+    token_type: str = "bearer"
+    user: UserResponse

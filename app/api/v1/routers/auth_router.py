@@ -144,8 +144,19 @@ async def login(
         expires_delta=access_token_expires,
     )
     return TokenResponse(
-        access_token=access_token,
+        token=access_token,
         token_type="bearer",
+        user=UserResponse(
+            id=existing_user.id,
+            first_name=existing_user.first_name,
+            last_name=existing_user.last_name,
+            email=existing_user.email,
+            phone_number=existing_user.phone_number,
+            role=existing_user.role,
+            profile_picture_url=existing_user.profile_picture_url,
+            created_at=existing_user.created_at,
+            updated_at=existing_user.updated_at,
+        ),
     )
 
 
@@ -162,7 +173,6 @@ async def create_user(
             select(User).filter(User.email == register_user_request.email)
         )
         existing_email = email_result.scalars().first()
-        print("email--->", existing_email)
         if existing_email:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
