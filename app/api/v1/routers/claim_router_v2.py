@@ -1,141 +1,61 @@
 """
 SHA Fraud Detection System — Claims Router
-File storage: Cloudinary (replaces local disk storage)
-All other flow remains identical to the previous version.
+Aligned to SHAClaimExtractor and the Social Health Insurance Act, 2023 claim form.
 """
 
-import shutil
-import tempfile
-import uuid
-from datetime import datetime
-from pathlib import Path
-from typing import List, Optional
-
-import cloudinary
-import cloudinary.uploader
-import httpx
-import pandas as pd
-from fastapi import (
-    APIRouter,
-    BackgroundTasks,
-    Depends,
-    File,
-    HTTPException,
-    UploadFile,
-    status,
-)
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, status
 from sqlalchemy.orm import Session
+from typing import List, Optional
+from datetime import datetime
+import shutil
+import uuid
+from pathlib import Path
 
-from app import models, schemas
-from app.core.config import settings
-from app.core.database import get_db
-from app.core.security import get_current_user
-from app.services.claim_extractor import SHAClaimData, sha_claim_extractor
-from app.services.fraud_analyzer import analyze_claim_background
+from app.config import settings
+from app.database import get_db
+from app import schemas, models
+from app.services.claim_extractor import sha_claim_extractor, SHAClaimData
+from app.services.fraud_analyzer import analyze_claim_background   # top-level import
+from app.utils.auth import get_current_user
+
+import pandas as pd
 
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
-# Cloudinary configuration
-# Expects these in your settings / environment variables:
-#   CLOUDINARY_CLOUD_NAME
-#   CLOUDINARY_API_KEY
-#   CLOUDINARY_API_SECRET
+# Allowed file extensions — single source of truth
 # ---------------------------------------------------------------------------
-
-cloudinary.config(
-    cloud_name=settings.CLOUDINARY_CLOUD_NAME,
-    api_key=settings.CLOUDINARY_API_KEY,
-    api_secret=settings.CLOUDINARY_API_SECRET,
-    secure=True,
-)
-
 ALLOWED_EXTENSIONS = {".pdf", ".xlsx", ".xls", ".csv", ".docx"}
 
-# Cloudinary resource type per extension.
-# Non-image files must use "raw".
-CLOUDINARY_RESOURCE_TYPES = {
-    ".pdf": "raw",
-    ".xlsx": "raw",
-    ".xls": "raw",
-    ".csv": "raw",
-    ".docx": "raw",
-}
 
-
-# ---------------------------------------------------------------------------
-# Cloudinary helpers
-# ---------------------------------------------------------------------------
-
-
-def _upload_to_cloudinary(file: UploadFile, user_id: int, ext: str) -> dict:
+def _save_upload(file: UploadFile, user_id: int) -> Path:
     """
-    Stream the uploaded file to Cloudinary via a short-lived temp file.
-    The temp file is deleted immediately after upload.
-
-    Folder structure on Cloudinary:
-        sha_claims/<user_id>/<uuid4>
-
-    Returns the full Cloudinary upload response dict containing
-    `secure_url`, `public_id`, `bytes`, etc.
+    Persist an uploaded file to disk with a collision-safe name.
+    Path: <UPLOAD_DIR>/<user_id>/<uuid4>_<original_filename>
+    Returns the resolved Path.
     """
-    public_id = f"sha_claims/{user_id}/{uuid.uuid4().hex}"
-    resource_type = CLOUDINARY_RESOURCE_TYPES.get(ext, "raw")
+    upload_dir = Path(settings.UPLOAD_DIR) / str(user_id)
+    upload_dir.mkdir(parents=True, exist_ok=True)
 
-    tmp_path = None
+    unique_name = f"{uuid.uuid4().hex}_{Path(file.filename).name}"
+    dest = upload_dir / unique_name
+
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            shutil.copyfileobj(file.file, tmp)
-            tmp_path = tmp.name
-
-        result = cloudinary.uploader.upload(
-            tmp_path,
-            public_id=public_id,
-            resource_type=resource_type,
-            tags=[f"user_{user_id}", "sha_claim"],
-            context={"original_filename": file.filename},
-        )
-    except Exception as exc:
+        with dest.open("wb") as buf:
+            shutil.copyfileobj(file.file, buf)
+    except OSError as exc:
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Cloudinary upload failed: {exc}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not save uploaded file: {exc}",
         )
-    finally:
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
-
-    return result
-
-
-def _download_from_cloudinary(secure_url: str, ext: str) -> str:
-    """
-    Download a Cloudinary file to a local temp file for extraction/parsing.
-    Returns the temp file path. Caller must delete it after use.
-    """
-
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            tmp_path = tmp.name
-            with httpx.stream("GET", secure_url) as response:
-                response.raise_for_status()
-                for chunk in response.iter_bytes():
-                    tmp.write(chunk)
-    except Exception as exc:
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to retrieve file from Cloudinary: {exc}",
-        )
-
-    return tmp_path
+    return dest
 
 
 # ---------------------------------------------------------------------------
 # POST /upload-and-extract
+# Single atomic endpoint: receive file → extract → return structured data.
+# The frontend does NOT need to know the server-side file path.
 # ---------------------------------------------------------------------------
-
 
 @router.post("/upload-and-extract", response_model=schemas.ExtractResponse)
 async def upload_and_extract(
@@ -144,18 +64,11 @@ async def upload_and_extract(
     current_user: models.User = Depends(get_current_user),
 ):
     """
-    Upload a SHA claim file to Cloudinary and immediately extract structured data.
+    Upload a SHA claim file and immediately extract structured data.
 
-    Flow:
-      1. Validate file extension
-      2. Upload file to Cloudinary  →  stored permanently at sha_claims/<user_id>/
-      3. Download file from Cloudinary to a short-lived temp file
-      4. Run SHAClaimExtractor on the temp file
-      5. Delete temp file
-      6. Return extracted data + Cloudinary references to the frontend
-
-    The frontend must store `cloudinary_public_id` and `cloudinary_url` and
-    pass them back in the /submit request so the DB record links to the file.
+    Accepts: PDF, Excel (.xlsx/.xls), CSV, DOCX
+    Returns: extracted SHAClaimData fields + validation errors (if any).
+    The frontend should display validation errors to the user before calling /submit.
     """
     ext = Path(file.filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -164,31 +77,22 @@ async def upload_and_extract(
             detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
         )
 
-    # ── 1. Upload to Cloudinary ───────────────────────────────────────────
-    cloudinary_result = _upload_to_cloudinary(file, current_user.id, ext)
-    secure_url = cloudinary_result["secure_url"]
-    public_id = cloudinary_result["public_id"]
-    file_size = cloudinary_result["bytes"]
-
-    # ── 2. Download to temp file for extraction ───────────────────────────
-    tmp_path = _download_from_cloudinary(secure_url, ext)
+    saved_path = _save_upload(file, current_user.id)
 
     try:
-        claim_data: SHAClaimData = sha_claim_extractor.extract_from_file(tmp_path)
+        claim_data: SHAClaimData = sha_claim_extractor.extract_from_file(str(saved_path))
     except Exception as exc:
+        saved_path.unlink(missing_ok=True)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Extraction failed: {exc}",
         )
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)  # always clean up
 
     is_valid, validation_errors = sha_claim_extractor.validate(claim_data)
 
     return {
-        "cloudinary_public_id": public_id,
-        "cloudinary_url": secure_url,
-        "file_size": file_size,
+        "file_path": str(saved_path),           # opaque token the frontend passes to /submit
+        "file_size": saved_path.stat().st_size,
         "extracted": claim_data.to_dict(),
         "is_valid": is_valid,
         "validation_errors": validation_errors,
@@ -197,8 +101,8 @@ async def upload_and_extract(
 
 # ---------------------------------------------------------------------------
 # POST /submit
+# Takes the pre-extracted + user-reviewed data and persists a Claim record.
 # ---------------------------------------------------------------------------
-
 
 @router.post("/submit", response_model=schemas.ClaimResponse)
 async def submit_claim(
@@ -208,11 +112,12 @@ async def submit_claim(
     current_user: models.User = Depends(get_current_user),
 ):
     """
-    Persist a validated SHA claim to the database and schedule fraud analysis.
+    Submit a validated SHA claim for fraud analysis and processing.
 
-    `claim_data` must include the `cloudinary_public_id` and `cloudinary_url`
-    returned by /upload-and-extract so the Claim row links back to the source file.
+    The frontend should call this after the user reviews and confirms the
+    data returned by /upload-and-extract.
     """
+    # ── Resolve provider ──────────────────────────────────────────────────
     provider = (
         db.query(models.Provider)
         .filter(models.Provider.provider_id == claim_data.provider_id)
@@ -227,18 +132,19 @@ async def submit_claim(
             ),
         )
 
+    # ── Generate claim number ─────────────────────────────────────────────
     claim_number = sha_claim_extractor.generate_claim_number(claim_data.provider_id)
 
+    # ── Build DB record — fields match SHAClaimData exactly ──────────────
     db_claim = models.Claim(
         claim_number=claim_number,
-        # Cloudinary file reference — stored on every claim for audit trail
-        source_file_url=claim_data.cloudinary_url,
-        source_file_public_id=claim_data.cloudinary_public_id,
+
         # Part I — Provider
         provider_id=provider.id,
-        provider_code=claim_data.provider_id,
+        provider_code=claim_data.provider_id,       # stored as provider_id on the form
         provider_name=claim_data.provider_name,
-        # Part II — Patient
+
+        # Part II — Patient (SHA form has no National ID field; sha_number is primary)
         patient_sha_number=claim_data.sha_number,
         patient_last_name=claim_data.patient_last_name,
         patient_first_name=claim_data.patient_first_name,
@@ -246,38 +152,44 @@ async def submit_claim(
         patient_residence=claim_data.residence,
         other_insurance=claim_data.other_insurance,
         relationship_to_principal=claim_data.relationship_to_principal,
+
         # Part III — Visit
         was_referred=claim_data.was_referred,
         referral_provider=claim_data.referral_provider,
-        visit_type=claim_data.visit_type,
+        visit_type=claim_data.visit_type,                       # Inpatient|Outpatient|Day-care
         visit_admission_date=claim_data.visit_admission_date,
         op_ip_number=claim_data.op_ip_number,
         new_or_return_visit=claim_data.new_or_return_visit,
         discharge_date=claim_data.discharge_date,
-        rendering_physician=claim_data.rendering_physician,
+        rendering_physician=claim_data.rendering_physician,     # name + reg no combined
         accommodation_type=claim_data.accommodation_type,
+
         # Field 9 — Disposition
         patient_disposition=claim_data.patient_disposition,
+
         # Field 10 — Discharge referral
         discharge_referral_institution=claim_data.discharge_referral_institution,
         discharge_referral_reason=claim_data.discharge_referral_reason,
+
         # Fields 11 & 12 — Diagnoses
         admission_diagnosis=claim_data.admission_diagnosis,
         discharge_diagnosis=claim_data.discharge_diagnosis,
         icd11_code=claim_data.icd11_code,
         related_procedure=claim_data.related_procedure,
         procedure_date=claim_data.procedure_date,
-        # Field 14 — Benefit lines (JSONB)
-        benefit_lines=(
-            [line.dict() for line in claim_data.benefit_lines]
-            if claim_data.benefit_lines
-            else []
-        ),
+
+        # Field 14 — Benefit lines (stored as JSONB array)
+        benefit_lines=[line.dict() for line in claim_data.benefit_lines]
+        if claim_data.benefit_lines else [],
+
+        # Derived totals (computed by extractor, confirmed by user)
         total_bill_amount=claim_data.total_bill_amount,
         total_claim_amount=claim_data.total_claim_amount,
+
         # Declaration
         patient_authorised_name=claim_data.patient_authorised_name,
         declaration_date=claim_data.declaration_date,
+
         # System fields
         submitted_by=current_user.id,
         submission_date=datetime.utcnow(),
@@ -288,6 +200,7 @@ async def submit_claim(
     db.commit()
     db.refresh(db_claim)
 
+    # ── Schedule fraud analysis ───────────────────────────────────────────
     background_tasks.add_task(analyze_claim_background, db_claim.id)
 
     return db_claim
@@ -295,25 +208,27 @@ async def submit_claim(
 
 # ---------------------------------------------------------------------------
 # POST /bulk-upload
+# Bulk ingest from CSV / Excel. One row = one claim.
 # ---------------------------------------------------------------------------
-
 
 @router.post("/bulk-upload", response_model=schemas.BulkUploadResponse)
 async def bulk_upload_claims(
     file: UploadFile = File(...),
+    background_tasks: BackgroundTasks,           # not Optional — must be injected
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     """
     Bulk upload claims from a CSV or Excel file.
+    Each row must represent one complete claim.
 
-    Flow:
-      1. Upload the bulk file to Cloudinary (audit trail)
-      2. Download it to a temp file for pandas parsing
-      3. Validate columns and visit_type values across all rows
-      4. Insert each row as a Claim linked to the Cloudinary file
-      5. Schedule fraud analysis per claim
+    Required columns (matching SHA form fields):
+        provider_id, sha_number, visit_type, visit_admission_date,
+        total_claim_amount, total_bill_amount
+
+    Optional but strongly recommended:
+        patient_last_name, patient_first_name, discharge_date,
+        accommodation_type, icd11_code, patient_disposition
     """
     ext = Path(file.filename).suffix.lower()
     if ext not in {".csv", ".xlsx", ".xls"}:
@@ -322,25 +237,16 @@ async def bulk_upload_claims(
             detail="Bulk upload accepts CSV or Excel files only.",
         )
 
-    # ── 1. Upload bulk file to Cloudinary ────────────────────────────────
-    cloudinary_result = _upload_to_cloudinary(file, current_user.id, ext)
-    bulk_file_url = cloudinary_result["secure_url"]
-    bulk_file_public_id = cloudinary_result["public_id"]
-
-    # ── 2. Download and parse ────────────────────────────────────────────
-    tmp_path = _download_from_cloudinary(bulk_file_url, ext)
     try:
-        df = pd.read_csv(tmp_path) if ext == ".csv" else pd.read_excel(tmp_path)
+        df = pd.read_csv(file.file) if ext == ".csv" else pd.read_excel(file.file)
         df = df.fillna("")
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Could not parse file: {exc}",
         )
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
 
-    # ── 3. Validate columns ──────────────────────────────────────────────
+    # ── Validate required columns ─────────────────────────────────────────
     required_cols = {
         "provider_id",
         "sha_number",
@@ -356,23 +262,25 @@ async def bulk_upload_claims(
             detail=f"Missing required columns: {sorted(missing_cols)}",
         )
 
-    valid_visit_types = {"inpatient", "outpatient", "day-care", "day care"}
-    invalid_rows = df[~df["visit_type"].str.lower().isin(valid_visit_types)]
-    if not invalid_rows.empty:
+    # ── Validate visit_type values before processing any rows ────────────
+    invalid_visit_types = (
+        df[~df["visit_type"].str.lower().isin({"inpatient", "outpatient", "day-care", "day care"})]
+    )
+    if not invalid_visit_types.empty:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Invalid visit_type in rows: {list(invalid_rows.index + 2)}. "
+                f"Invalid visit_type values in rows: "
+                f"{list(invalid_visit_types.index + 2)}. "   # +2: 1-indexed + header row
                 "Must be one of: Inpatient, Outpatient, Day-care"
             ),
         )
 
-    # ── 4. Insert claims ─────────────────────────────────────────────────
     claim_ids: List[int] = []
     errors: List[dict] = []
 
     for idx, row in df.iterrows():
-        row_num = int(idx) + 2
+        row_num = int(idx) + 2  # 1-indexed + header row
         try:
             provider = (
                 db.query(models.Provider)
@@ -380,27 +288,20 @@ async def bulk_upload_claims(
                 .first()
             )
             if not provider:
-                errors.append(
-                    {
-                        "row": row_num,
-                        "error": f"Provider '{row['provider_id']}' not found",
-                    }
-                )
+                errors.append({
+                    "row": row_num,
+                    "error": f"Provider '{row['provider_id']}' not found",
+                })
                 continue
 
-            claim_number = sha_claim_extractor.generate_claim_number(
-                str(row["provider_id"])
-            )
+            claim_number = sha_claim_extractor.generate_claim_number(str(row["provider_id"]))
 
             db_claim = models.Claim(
                 claim_number=claim_number,
-                # Every row links to the same bulk file on Cloudinary
-                source_file_url=bulk_file_url,
-                source_file_public_id=bulk_file_public_id,
-                # Provider
                 provider_id=provider.id,
                 provider_code=str(row["provider_id"]),
                 provider_name=str(row.get("provider_name", "")),
+
                 # Patient
                 patient_sha_number=str(row["sha_number"]),
                 patient_last_name=str(row.get("patient_last_name", "")),
@@ -408,7 +309,8 @@ async def bulk_upload_claims(
                 patient_middle_name=str(row.get("patient_middle_name", "")),
                 patient_residence=str(row.get("residence", "")),
                 relationship_to_principal=str(row.get("relationship_to_principal", "")),
-                # Visit
+
+                # Visit — visit_type already validated above; preserve actual value
                 visit_type=str(row["visit_type"]).strip().title(),
                 visit_admission_date=pd.to_datetime(row["visit_admission_date"]),
                 discharge_date=(
@@ -420,19 +322,27 @@ async def bulk_upload_claims(
                 op_ip_number=str(row.get("op_ip_number", "")),
                 new_or_return_visit=str(row.get("new_or_return_visit", "")),
                 rendering_physician=str(row.get("rendering_physician", "")),
+
                 # Referral
-                was_referred=str(row.get("was_referred", "")).lower()
-                in {"yes", "true", "1"},
+                was_referred=(
+                    str(row.get("was_referred", "")).lower() in {"yes", "true", "1"}
+                ),
                 referral_provider=str(row.get("referral_provider", "")),
-                # Disposition & diagnoses
+
+                # Disposition
                 patient_disposition=str(row.get("patient_disposition", "")),
+
+                # Diagnoses
                 admission_diagnosis=str(row.get("admission_diagnosis", "")),
                 discharge_diagnosis=str(row.get("discharge_diagnosis", "")),
                 icd11_code=str(row.get("icd11_code", "")),
                 related_procedure=str(row.get("related_procedure", "")),
-                # Amounts
+
+                # Amounts — no single scalar; amounts live on benefit lines in the form,
+                # but for bulk CSV we accept pre-aggregated totals
                 total_bill_amount=float(row["total_bill_amount"]),
                 total_claim_amount=float(row["total_claim_amount"]),
+
                 submitted_by=current_user.id,
                 submission_date=datetime.utcnow(),
                 status=models.ClaimStatus.PROCESSING,
@@ -454,9 +364,9 @@ async def bulk_upload_claims(
         "claim_ids": claim_ids,
         "failed_count": len(errors),
         "errors": errors,
-        "bulk_file_url": bulk_file_url,
         "message": (
-            f"Successfully submitted {len(claim_ids)} claims. " f"{len(errors)} failed."
+            f"Successfully submitted {len(claim_ids)} claims. "
+            f"{len(errors)} failed."
         ),
     }
 
@@ -465,12 +375,11 @@ async def bulk_upload_claims(
 # GET /
 # ---------------------------------------------------------------------------
 
-
 @router.get("/", response_model=List[schemas.ClaimResponse])
 async def list_claims(
-    claim_status: Optional[models.ClaimStatus] = None,
+    claim_status: Optional[models.ClaimStatus] = None,  # renamed: 'status' shadows builtin
     is_flagged: Optional[bool] = None,
-    provider_id: Optional[str] = None,
+    provider_id: Optional[str] = None,                  # matches SHA form field name
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
     limit: int = 50,
@@ -478,7 +387,11 @@ async def list_claims(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """List claims with optional filters. Max 200 results per page."""
+    """
+    List claims with optional filters. Results are paginated.
+    `claim_status` replaces the original `status` parameter name
+    (which shadows Python's built-in `status`).
+    """
     query = db.query(models.Claim)
 
     if claim_status:
@@ -492,18 +405,18 @@ async def list_claims(
     if date_to:
         query = query.filter(models.Claim.visit_admission_date <= date_to)
 
-    return (
+    claims = (
         query.order_by(models.Claim.submission_date.desc())
         .offset(offset)
-        .limit(min(limit, 200))
+        .limit(min(limit, 200))          # hard cap prevents runaway queries
         .all()
     )
+    return claims
 
 
 # ---------------------------------------------------------------------------
 # GET /{claim_id}
 # ---------------------------------------------------------------------------
-
 
 @router.get("/{claim_id}", response_model=schemas.ClaimDetailResponse)
 async def get_claim(
@@ -511,12 +424,10 @@ async def get_claim(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Retrieve full details for a single claim, including its Cloudinary file URL."""
+    """Retrieve full details for a single claim."""
     claim = db.query(models.Claim).filter(models.Claim.id == claim_id).first()
     if not claim:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found")
     return claim
 
 
@@ -524,19 +435,19 @@ async def get_claim(
 # GET /{claim_id}/risk-score
 # ---------------------------------------------------------------------------
 
-
 @router.get("/{claim_id}/risk-score", response_model=schemas.RiskScoreResponse)
 async def get_claim_risk_score(
     claim_id: int,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Return the fraud risk score and flag details for a claim."""
+    """
+    Return the fraud risk score and flag details for a claim.
+    If fraud analysis has not yet completed, `risk_score` will be None.
+    """
     claim = db.query(models.Claim).filter(models.Claim.id == claim_id).first()
     if not claim:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found")
 
     return {
         "claim_id": claim.id,
@@ -553,7 +464,6 @@ async def get_claim_risk_score(
 # PUT /{claim_id}/status
 # ---------------------------------------------------------------------------
 
-
 @router.put("/{claim_id}/status", response_model=schemas.ClaimResponse)
 async def update_claim_status(
     claim_id: int,
@@ -561,26 +471,31 @@ async def update_claim_status(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Update a claim's status, processing notes, or approval details."""
+    """
+    Update a claim's status, add processing notes, approve/reject.
+    Only authorised reviewers should call this endpoint
+    (enforce in get_current_user or add a role check here).
+    """
     claim = db.query(models.Claim).filter(models.Claim.id == claim_id).first()
     if not claim:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found")
 
     if update_data.status:
         claim.status = update_data.status
+
     if update_data.processing_notes:
         claim.processing_notes = update_data.processing_notes
+
     if update_data.approved_amount is not None:
         if update_data.approved_amount > claim.total_claim_amount:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="approved_amount cannot exceed total_claim_amount",
+                detail="approved_amount cannot exceed the submitted total_claim_amount",
             )
         claim.approved_amount = update_data.approved_amount
         claim.approved_by = current_user.id
         claim.approved_at = datetime.utcnow()
+
     if update_data.rejection_reason:
         claim.rejection_reason = update_data.rejection_reason
 
