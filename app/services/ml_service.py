@@ -12,6 +12,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models import Claim, ClaimStatus, MLModel, Provider

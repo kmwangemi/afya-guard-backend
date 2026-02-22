@@ -1,6 +1,9 @@
-# ===========================================================================
-# upcoding_detector.py
-# ===========================================================================
+from typing import Any, Dict, List
+
+from sqlalchemy.orm import Session
+
+from app.models.claim_model import Claim
+from app.models.enums_model import FraudSeverity
 
 
 class UpcodingDetector:

@@ -1,13 +1,16 @@
-# ===========================================================================
-# fraud_analyzer.py  (orchestrator)
-# ===========================================================================
-
-import time
 import asyncio
-from sqlalchemy.orm import Session
+import time
 from datetime import datetime
-from app.models import Claim, FraudAlert, ClaimStatus
+from typing import Any, Dict
+
+from sqlalchemy.orm import Session
+
+from app.models import Claim, ClaimStatus, FraudAlert
+from app.services.duplicate_detector import DuplicateDetector
 from app.services.ml_service import MLService
+from app.services.phantom_detector import PhantomPatientDetector
+from app.services.provider_profiler import ProviderProfiler
+from app.services.upcoding_detector import UpcodingDetector
 
 
 class FraudAnalyzer:
@@ -230,9 +233,9 @@ async def analyze_claim_background(claim_id: int) -> None:
     Background task entry point called from the FastAPI router.
     Opens its own DB session, runs full analysis, writes results back to Claim.
     """
-    from app.database import SessionLocal
+    from app.core.database import AsyncSessionLocal
 
-    db = SessionLocal()
+    db = AsyncSessionLocal()
     try:
         claim = db.query(Claim).filter(Claim.id == claim_id).first()
         if not claim:

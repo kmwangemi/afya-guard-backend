@@ -1,10 +1,10 @@
-from typing import Dict, Any, List, Optional
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func
-from datetime import datetime, timedelta
-from decimal import Decimal
+from datetime import timedelta
+from typing import Any, Dict, List
 
-from app.models import Claim, Provider, Patient, FraudAlert, FraudSeverity
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.models import Claim, FraudSeverity
 
 
 class DuplicateDetector:

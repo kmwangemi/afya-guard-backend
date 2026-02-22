@@ -1,6 +1,12 @@
-# ===========================================================================
-# provider_profiler.py
-# ===========================================================================
+from datetime import datetime, timedelta
+from typing import Any, Dict, List
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.models.claim_model import Claim
+from app.models.enums_model import FraudSeverity
+from app.models.provider_model import Provider
 
 
 class ProviderProfiler:

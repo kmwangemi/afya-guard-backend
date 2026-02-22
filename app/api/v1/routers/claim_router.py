@@ -26,10 +26,22 @@ from fastapi import (
 )
 from sqlalchemy.orm import Session
 
-from app import models, schemas
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import get_current_user
+from app.models.claim_model import Claim
+from app.models.enums_model import ClaimStatus
+from app.models.provider_model import Provider
+from app.models.user_model import User
+from app.schemas.claim_schema import (
+    BulkUploadResponse,
+    ClaimCreate,
+    ClaimDetailResponse,
+    ClaimResponse,
+    ClaimUpdate,
+    ExtractResponse,
+    RiskScoreResponse,
+)
 from app.services.claim_extractor import SHAClaimData, sha_claim_extractor
 from app.services.fraud_analyzer import analyze_claim_background
 
@@ -44,9 +56,9 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 cloudinary.config(
-    cloud_name=settings.CLOUDINARY_CLOUD_NAME,
-    api_key=settings.CLOUDINARY_API_KEY,
-    api_secret=settings.CLOUDINARY_API_SECRET,
+    cloud_name=settings.cloudinary_cloud_name,
+    api_key=settings.cloudinary_api_key,
+    api_secret=settings.cloudinary_api_secret,
     secure=True,
 )
 
@@ -137,11 +149,11 @@ def _download_from_cloudinary(secure_url: str, ext: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/upload-and-extract", response_model=schemas.ExtractResponse)
+@router.post("/upload-and-extract", response_model=ExtractResponse)
 async def upload_and_extract(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Upload a SHA claim file to Cloudinary and immediately extract structured data.
@@ -200,12 +212,12 @@ async def upload_and_extract(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/submit", response_model=schemas.ClaimResponse)
+@router.post("/submit", response_model=ClaimResponse)
 async def submit_claim(
-    claim_data: schemas.ClaimCreate,
+    claim_data: ClaimCreate,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Persist a validated SHA claim to the database and schedule fraud analysis.
@@ -214,8 +226,8 @@ async def submit_claim(
     returned by /upload-and-extract so the Claim row links back to the source file.
     """
     provider = (
-        db.query(models.Provider)
-        .filter(models.Provider.provider_id == claim_data.provider_id)
+        db.query(Provider)
+        .filter(Provider.provider_id == claim_data.provider_id)
         .first()
     )
     if not provider:
@@ -229,7 +241,7 @@ async def submit_claim(
 
     claim_number = sha_claim_extractor.generate_claim_number(claim_data.provider_id)
 
-    db_claim = models.Claim(
+    db_claim = Claim(
         claim_number=claim_number,
         # Cloudinary file reference — stored on every claim for audit trail
         source_file_url=claim_data.cloudinary_url,
@@ -281,7 +293,7 @@ async def submit_claim(
         # System fields
         submitted_by=current_user.id,
         submission_date=datetime.utcnow(),
-        status=models.ClaimStatus.PROCESSING,
+        status=ClaimStatus.PROCESSING,
     )
 
     db.add(db_claim)
@@ -298,11 +310,11 @@ async def submit_claim(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/bulk-upload", response_model=schemas.BulkUploadResponse)
+@router.post("/bulk-upload", response_model=BulkUploadResponse)
 async def bulk_upload_claims(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     """
@@ -375,8 +387,8 @@ async def bulk_upload_claims(
         row_num = int(idx) + 2
         try:
             provider = (
-                db.query(models.Provider)
-                .filter(models.Provider.provider_id == row["provider_id"])
+                db.query(Provider)
+                .filter(Provider.provider_id == row["provider_id"])
                 .first()
             )
             if not provider:
@@ -392,7 +404,7 @@ async def bulk_upload_claims(
                 str(row["provider_id"])
             )
 
-            db_claim = models.Claim(
+            db_claim = Claim(
                 claim_number=claim_number,
                 # Every row links to the same bulk file on Cloudinary
                 source_file_url=bulk_file_url,
@@ -435,7 +447,7 @@ async def bulk_upload_claims(
                 total_claim_amount=float(row["total_claim_amount"]),
                 submitted_by=current_user.id,
                 submission_date=datetime.utcnow(),
-                status=models.ClaimStatus.PROCESSING,
+                status=ClaimStatus.PROCESSING,
             )
 
             db.add(db_claim)
@@ -466,9 +478,9 @@ async def bulk_upload_claims(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/", response_model=List[schemas.ClaimResponse])
+@router.get("/", response_model=List[ClaimResponse])
 async def list_claims(
-    claim_status: Optional[models.ClaimStatus] = None,
+    claim_status: Optional[ClaimStatus] = None,
     is_flagged: Optional[bool] = None,
     provider_id: Optional[str] = None,
     date_from: Optional[datetime] = None,
@@ -476,24 +488,24 @@ async def list_claims(
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """List claims with optional filters. Max 200 results per page."""
-    query = db.query(models.Claim)
+    query = db.query(Claim)
 
     if claim_status:
-        query = query.filter(models.Claim.status == claim_status)
+        query = query.filter(Claim.status == claim_status)
     if is_flagged is not None:
-        query = query.filter(models.Claim.is_flagged == is_flagged)
+        query = query.filter(Claim.is_flagged == is_flagged)
     if provider_id:
-        query = query.filter(models.Claim.provider_code == provider_id)
+        query = query.filter(Claim.provider_code == provider_id)
     if date_from:
-        query = query.filter(models.Claim.visit_admission_date >= date_from)
+        query = query.filter(Claim.visit_admission_date >= date_from)
     if date_to:
-        query = query.filter(models.Claim.visit_admission_date <= date_to)
+        query = query.filter(Claim.visit_admission_date <= date_to)
 
     return (
-        query.order_by(models.Claim.submission_date.desc())
+        query.order_by(Claim.submission_date.desc())
         .offset(offset)
         .limit(min(limit, 200))
         .all()
@@ -505,14 +517,14 @@ async def list_claims(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/{claim_id}", response_model=schemas.ClaimDetailResponse)
+@router.get("/{claim_id}", response_model=ClaimDetailResponse)
 async def get_claim(
     claim_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Retrieve full details for a single claim, including its Cloudinary file URL."""
-    claim = db.query(models.Claim).filter(models.Claim.id == claim_id).first()
+    claim = db.query(Claim).filter(Claim.id == claim_id).first()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
@@ -525,14 +537,14 @@ async def get_claim(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/{claim_id}/risk-score", response_model=schemas.RiskScoreResponse)
+@router.get("/{claim_id}/risk-score", response_model=RiskScoreResponse)
 async def get_claim_risk_score(
     claim_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Return the fraud risk score and flag details for a claim."""
-    claim = db.query(models.Claim).filter(models.Claim.id == claim_id).first()
+    claim = db.query(Claim).filter(Claim.id == claim_id).first()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
@@ -554,15 +566,15 @@ async def get_claim_risk_score(
 # ---------------------------------------------------------------------------
 
 
-@router.put("/{claim_id}/status", response_model=schemas.ClaimResponse)
+@router.put("/{claim_id}/status", response_model=ClaimResponse)
 async def update_claim_status(
     claim_id: int,
-    update_data: schemas.ClaimUpdate,
+    update_data: ClaimUpdate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Update a claim's status, processing notes, or approval details."""
-    claim = db.query(models.Claim).filter(models.Claim.id == claim_id).first()
+    claim = db.query(Claim).filter(Claim.id == claim_id).first()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
