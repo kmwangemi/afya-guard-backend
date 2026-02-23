@@ -67,6 +67,8 @@ def verify_access_token(token: str) -> str | None:
 
 async def get_current_user(token: TokenDependency, db: DbDependency):
     """Get the currently authenticated user based on the provided JWT token."""
+    import uuid
+
     user_id = verify_access_token(token)
     if user_id is None:
         raise HTTPException(
@@ -74,17 +76,17 @@ async def get_current_user(token: TokenDependency, db: DbDependency):
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    # validate user_id is a valid integer (defence against malformed jwts)
+    # validate user_id is a valid UUID (defence against malformed jwts)
     try:
-        user_id_int = int(user_id)
+        user_uuid = uuid.UUID(user_id)
     except (TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail="Invalid or expired token format",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
     # Fetch user from database
-    result = await db.execute(select(User).filter(User.id == user_id_int))
+    result = await db.execute(select(User).filter(User.id == user_uuid))
     user = result.scalars().first()
     if not user:
         raise HTTPException(

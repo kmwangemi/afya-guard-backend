@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.routers.auth_router import auth_router
 
-# from app.api.v1.routers.claim_router import claim_router
+from app.api.v1.routers.claim_router import router as claim_router
 
 
 app = FastAPI(
@@ -37,11 +37,11 @@ async def health_check():
 # API Prefixes
 BASE_URL_PREFIX = "/api/v1"
 # Include API Routes
-# app.include_router(
-#     claim_router,
-#     prefix=f"{BASE_URL_PREFIX}",
-#     tags=["Claims"],
-# )
+app.include_router(
+    claim_router,
+    prefix=f"{BASE_URL_PREFIX}/claims",
+    tags=["Claims"],
+)
 app.include_router(
     auth_router,
     prefix=f"{BASE_URL_PREFIX}",

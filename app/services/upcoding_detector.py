@@ -1,6 +1,6 @@
 from typing import Any, Dict, List
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.claim_model import Claim
 from app.models.enums_model import FraudSeverity
@@ -65,7 +65,7 @@ class UpcodingDetector:
         "organ transplant",
     }
 
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
 
     async def analyze_claim(self, claim: Claim) -> Dict[str, Any]:

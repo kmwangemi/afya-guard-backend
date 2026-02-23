@@ -15,6 +15,8 @@ import cloudinary
 import cloudinary.uploader
 import httpx
 import pandas as pd
+import asyncio
+import aiofiles
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -24,7 +26,8 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
 from app.core.config import settings
 from app.core.database import get_db
@@ -119,7 +122,7 @@ def _upload_to_cloudinary(file: UploadFile, user_id: int, ext: str) -> dict:
     return result
 
 
-def _download_from_cloudinary(secure_url: str, ext: str) -> str:
+async def _download_from_cloudinary(secure_url: str, ext: str) -> str:
     """
     Download a Cloudinary file to a local temp file for extraction/parsing.
     Returns the temp file path. Caller must delete it after use.
@@ -129,10 +132,13 @@ def _download_from_cloudinary(secure_url: str, ext: str) -> str:
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
             tmp_path = tmp.name
-            with httpx.stream("GET", secure_url) as response:
+            
+        async with httpx.AsyncClient() as client:
+            async with client.stream("GET", secure_url) as response:
                 response.raise_for_status()
-                for chunk in response.iter_bytes():
-                    tmp.write(chunk)
+                async with aiofiles.open(tmp_path, 'wb') as out_file:
+                    async for chunk in response.aiter_bytes():
+                        await out_file.write(chunk)
     except Exception as exc:
         if tmp_path:
             Path(tmp_path).unlink(missing_ok=True)
@@ -152,7 +158,7 @@ def _download_from_cloudinary(secure_url: str, ext: str) -> str:
 @router.post("/upload-and-extract", response_model=ExtractResponse)
 async def upload_and_extract(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -177,16 +183,16 @@ async def upload_and_extract(
         )
 
     # ── 1. Upload to Cloudinary ───────────────────────────────────────────
-    cloudinary_result = _upload_to_cloudinary(file, current_user.id, ext)
+    cloudinary_result = await asyncio.to_thread(_upload_to_cloudinary, file, current_user.id, ext)
     secure_url = cloudinary_result["secure_url"]
     public_id = cloudinary_result["public_id"]
     file_size = cloudinary_result["bytes"]
 
     # ── 2. Download to temp file for extraction ───────────────────────────
-    tmp_path = _download_from_cloudinary(secure_url, ext)
+    tmp_path = await _download_from_cloudinary(secure_url, ext)
 
     try:
-        claim_data: SHAClaimData = sha_claim_extractor.extract_from_file(tmp_path)
+        claim_data: SHAClaimData = await asyncio.to_thread(sha_claim_extractor.extract_from_file, tmp_path)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -216,7 +222,7 @@ async def upload_and_extract(
 async def submit_claim(
     claim_data: ClaimCreate,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -225,11 +231,10 @@ async def submit_claim(
     `claim_data` must include the `cloudinary_public_id` and `cloudinary_url`
     returned by /upload-and-extract so the Claim row links back to the source file.
     """
-    provider = (
-        db.query(Provider)
-        .filter(Provider.provider_id == claim_data.provider_id)
-        .first()
+    result = await db.execute(
+        select(Provider).filter(Provider.provider_id == claim_data.provider_id)
     )
+    provider = result.scalars().first()
     if not provider:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -297,8 +302,8 @@ async def submit_claim(
     )
 
     db.add(db_claim)
-    db.commit()
-    db.refresh(db_claim)
+    await db.commit()
+    await db.refresh(db_claim)
 
     background_tasks.add_task(analyze_claim_background, db_claim.id)
 
@@ -313,7 +318,7 @@ async def submit_claim(
 @router.post("/bulk-upload", response_model=BulkUploadResponse)
 async def bulk_upload_claims(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
@@ -335,14 +340,17 @@ async def bulk_upload_claims(
         )
 
     # ── 1. Upload bulk file to Cloudinary ────────────────────────────────
-    cloudinary_result = _upload_to_cloudinary(file, current_user.id, ext)
+    cloudinary_result = await asyncio.to_thread(_upload_to_cloudinary, file, current_user.id, ext)
     bulk_file_url = cloudinary_result["secure_url"]
     bulk_file_public_id = cloudinary_result["public_id"]
 
     # ── 2. Download and parse ────────────────────────────────────────────
-    tmp_path = _download_from_cloudinary(bulk_file_url, ext)
+    tmp_path = await _download_from_cloudinary(bulk_file_url, ext)
     try:
-        df = pd.read_csv(tmp_path) if ext == ".csv" else pd.read_excel(tmp_path)
+        def read_file(path, is_csv):
+            return pd.read_csv(path) if is_csv else pd.read_excel(path)
+        
+        df = await asyncio.to_thread(read_file, tmp_path, ext == ".csv")
         df = df.fillna("")
     except Exception as exc:
         raise HTTPException(
@@ -386,11 +394,8 @@ async def bulk_upload_claims(
     for idx, row in df.iterrows():
         row_num = int(idx) + 2
         try:
-            provider = (
-                db.query(Provider)
-                .filter(Provider.provider_id == row["provider_id"])
-                .first()
-            )
+            result = await db.execute(select(Provider).filter(Provider.provider_id == row["provider_id"]))
+            provider = result.scalars().first()
             if not provider:
                 errors.append(
                     {
@@ -451,14 +456,14 @@ async def bulk_upload_claims(
             )
 
             db.add(db_claim)
-            db.commit()
-            db.refresh(db_claim)
+            await db.commit()
+            await db.refresh(db_claim)
 
             claim_ids.append(db_claim.id)
             background_tasks.add_task(analyze_claim_background, db_claim.id)
 
         except Exception as exc:
-            db.rollback()
+            await db.rollback()
             errors.append({"row": row_num, "error": str(exc)})
 
     return {
@@ -487,11 +492,11 @@ async def list_claims(
     date_to: Optional[datetime] = None,
     limit: int = 50,
     offset: int = 0,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """List claims with optional filters. Max 200 results per page."""
-    query = db.query(Claim)
+    query = select(Claim)
 
     if claim_status:
         query = query.filter(Claim.status == claim_status)
@@ -504,12 +509,9 @@ async def list_claims(
     if date_to:
         query = query.filter(Claim.visit_admission_date <= date_to)
 
-    return (
-        query.order_by(Claim.submission_date.desc())
-        .offset(offset)
-        .limit(min(limit, 200))
-        .all()
-    )
+    query = query.order_by(Claim.submission_date.desc()).offset(offset).limit(min(limit, 200))
+    result = await db.execute(query)
+    return result.scalars().all()
 
 
 # ---------------------------------------------------------------------------
@@ -520,11 +522,12 @@ async def list_claims(
 @router.get("/{claim_id}", response_model=ClaimDetailResponse)
 async def get_claim(
     claim_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Retrieve full details for a single claim, including its Cloudinary file URL."""
-    claim = db.query(Claim).filter(Claim.id == claim_id).first()
+    result = await db.execute(select(Claim).filter(Claim.id == claim_id))
+    claim = result.scalars().first()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
@@ -540,11 +543,12 @@ async def get_claim(
 @router.get("/{claim_id}/risk-score", response_model=RiskScoreResponse)
 async def get_claim_risk_score(
     claim_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Return the fraud risk score and flag details for a claim."""
-    claim = db.query(Claim).filter(Claim.id == claim_id).first()
+    result = await db.execute(select(Claim).filter(Claim.id == claim_id))
+    claim = result.scalars().first()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
@@ -570,11 +574,12 @@ async def get_claim_risk_score(
 async def update_claim_status(
     claim_id: int,
     update_data: ClaimUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Update a claim's status, processing notes, or approval details."""
-    claim = db.query(Claim).filter(Claim.id == claim_id).first()
+    result = await db.execute(select(Claim).filter(Claim.id == claim_id))
+    claim = result.scalars().first()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
@@ -596,6 +601,6 @@ async def update_claim_status(
     if update_data.rejection_reason:
         claim.rejection_reason = update_data.rejection_reason
 
-    db.commit()
-    db.refresh(claim)
+    await db.commit()
+    await db.refresh(claim)
     return claim

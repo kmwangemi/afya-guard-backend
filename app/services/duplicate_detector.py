@@ -2,7 +2,8 @@ from datetime import timedelta
 from typing import Any, Dict, List
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
 from app.models import Claim, FraudSeverity
 
@@ -17,7 +18,7 @@ class DuplicateDetector:
       - claim_amount         →  total_claim_amount
     """
 
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
 
     async def analyze_claim(self, claim: Claim) -> Dict[str, Any]:
@@ -37,16 +38,16 @@ class DuplicateDetector:
 
         # ── 1. Exact duplicate ────────────────────────────────────────────
         # Same SHA number + same admission date + same total_claim_amount
-        exact_duplicates = (
-            self.db.query(Claim)
+        result = await self.db.execute(
+            select(Claim)
             .filter(
                 Claim.id != claim.id,
                 Claim.patient_sha_number == claim.patient_sha_number,
                 Claim.visit_admission_date == claim.visit_admission_date,
                 Claim.total_claim_amount == claim.total_claim_amount,
             )
-            .all()
         )
+        exact_duplicates = result.scalars().all()
 
         if exact_duplicates:
             risk_score += 100.0
@@ -68,8 +69,8 @@ class DuplicateDetector:
         # ── 2. Rolling duplicate ──────────────────────────────────────────
         # Same SHA number + same provider + same total_claim_amount within ±2 days
         if not exact_duplicates:
-            rolling_duplicates = (
-                self.db.query(Claim)
+            result = await self.db.execute(
+                select(Claim)
                 .filter(
                     Claim.id != claim.id,
                     Claim.patient_sha_number == claim.patient_sha_number,
@@ -80,8 +81,8 @@ class DuplicateDetector:
                     Claim.visit_admission_date
                     <= claim.visit_admission_date + timedelta(days=2),
                 )
-                .all()
             )
+            rolling_duplicates = result.scalars().all()
 
             if rolling_duplicates:
                 risk_score += 80.0
@@ -102,8 +103,8 @@ class DuplicateDetector:
 
         # ── 3. Same-day multi-facility billing ────────────────────────────
         # Patient billed at two or more different providers on same admission date
-        same_day_other_providers = (
-            self.db.query(Claim)
+        result = await self.db.execute(
+            select(Claim)
             .filter(
                 Claim.id != claim.id,
                 Claim.patient_sha_number == claim.patient_sha_number,
@@ -111,8 +112,8 @@ class DuplicateDetector:
                 func.date(Claim.visit_admission_date)
                 == func.date(claim.visit_admission_date),
             )
-            .all()
         )
+        same_day_other_providers = result.scalars().all()
 
         if same_day_other_providers:
             risk_score += 60.0
@@ -141,8 +142,8 @@ class DuplicateDetector:
             and claim.visit_type.lower() == "inpatient"
             and claim.discharge_date
         ):
-            overlapping = (
-                self.db.query(Claim)
+            result = await self.db.execute(
+                select(Claim)
                 .filter(
                     Claim.id != claim.id,
                     Claim.patient_sha_number == claim.patient_sha_number,
@@ -152,8 +153,8 @@ class DuplicateDetector:
                     Claim.visit_admission_date < claim.discharge_date,
                     Claim.discharge_date > claim.visit_admission_date,
                 )
-                .all()
             )
+            overlapping = result.scalars().all()
 
             if overlapping:
                 risk_score += 85.0
@@ -184,15 +185,15 @@ class DuplicateDetector:
 
         if preauth_numbers:
             for preauth_no in preauth_numbers:
-                preauth_conflicts = (
-                    self.db.query(Claim)
+                result = await self.db.execute(
+                    select(Claim)
                     .filter(
                         Claim.id != claim.id,
                         # JSON array contains the preauth number
                         Claim.benefit_lines.cast(str).contains(preauth_no),
                     )
-                    .all()
                 )
+                preauth_conflicts = result.scalars().all()
                 if preauth_conflicts:
                     risk_score += 70.0
                     flags.append(

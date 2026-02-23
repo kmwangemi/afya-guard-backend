@@ -5,7 +5,9 @@ from typing import TYPE_CHECKING, List, Optional
 
 from sqlalchemy import Boolean, DateTime, Float, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
 from app.core.database import Base
 
@@ -129,7 +131,7 @@ class Provider(Base):
     claims: Mapped[List["Claim"]] = relationship("Claim", back_populates="provider")
 
     # ── Stats updater ─────────────────────────────────────────────────────────
-    def update_stats(self, db: Session) -> None:
+    async def update_stats(self, db: AsyncSession) -> None:
         """
         Recompute all aggregate counters from live claim data.
         Call this after a claim status changes (approval, rejection, flagging).
@@ -138,8 +140,8 @@ class Provider(Base):
         load time. This is the correct pattern when two models reference each other.
 
         Usage:
-            provider.update_stats(db)
-            db.commit()
+            await provider.update_stats(db)
+            await db.commit()
         """
         # Local imports — intentional. Importing Claim at module level creates
         # a circular import that breaks SQLAlchemy column registration and
@@ -149,8 +151,8 @@ class Provider(Base):
         from app.models.claim_model import Claim  # noqa: PLC0415
         from app.models.enums_model import ClaimStatus  # noqa: PLC0415
 
-        row = (
-            db.query(
+        query = (
+            select(
                 # func.count() with no args emits COUNT(*) — avoids the Pylint
                 # false positive of func.count(Claim.id) being flagged as
                 # "count is not callable" when imported at module level.
@@ -182,8 +184,14 @@ class Provider(Base):
                 func.max(Claim.visit_admission_date).label("last_claim"),
             )
             # Filter by the Provider DB primary key (uuid), not provider_id string
-            .filter(Claim.provider_id == self.id).one()
+            .filter(Claim.provider_id == self.id)
         )
+        
+        result = await db.execute(query)
+        row = result.first()
+        
+        if not row:
+            return
 
         self.total_claims_count = row.total or 0
         self.flagged_claims_count = row.flagged or 0

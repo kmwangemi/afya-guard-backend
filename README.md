@@ -25,7 +25,7 @@ This will create a virtual environment and install all packages from your `pypro
 Create a `.env` file in the project root with your database configuration:
 
 ```bash
-DATABASE_URL=postgresql://user:password@localhost:5432/your_database
+DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/your_database
 SECRET_KEY=your-secret-key-here
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 ```

@@ -2,7 +2,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
 from app.models.claim_model import Claim
 from app.models.enums_model import FraudSeverity
@@ -21,7 +22,7 @@ class PhantomPatientDetector:
       - is_referred         → was_referred (bool)
     """
 
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
         self.sha_registry_url = getattr(
             __import__("app.config", fromlist=["settings"]).settings,
@@ -214,15 +215,15 @@ class PhantomPatientDetector:
         if not claim.visit_admission_date:
             return {"is_impossible": False}
 
-        current_provider = (
-            claim.provider
-            or self.db.query(Provider).filter(Provider.id == claim.provider_id).first()
-        )
+        current_provider = claim.provider
+        if not current_provider:
+            result = await self.db.execute(select(Provider).filter(Provider.id == claim.provider_id))
+            current_provider = result.scalars().first()
         if not current_provider or not getattr(current_provider, "county", None):
             return {"is_impossible": False}
 
-        same_day_claims = (
-            self.db.query(Claim)
+        result = await self.db.execute(
+            select(Claim)
             .join(Provider, Claim.provider_id == Provider.id)
             .filter(
                 Claim.patient_sha_number == claim.patient_sha_number,
@@ -230,8 +231,8 @@ class PhantomPatientDetector:
                 func.date(Claim.visit_admission_date)
                 == func.date(claim.visit_admission_date),
             )
-            .all()
         )
+        same_day_claims = result.scalars().all()
 
         for other in same_day_claims:
             if other.provider and other.provider.county != current_provider.county:
@@ -372,15 +373,14 @@ class PhantomPatientDetector:
         """
         thirty_days_ago = datetime.utcnow() - timedelta(days=30)
 
-        count = (
-            self.db.query(func.count(Claim.id))
+        result = await self.db.execute(
+            select(func.count(Claim.id))
             .filter(
                 Claim.patient_sha_number == sha_number,
                 Claim.visit_admission_date >= thirty_days_ago,
             )
-            .scalar()
-            or 0
         )
+        count = result.scalar() or 0
 
         if count > 50:
             return {

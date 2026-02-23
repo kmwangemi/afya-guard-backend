@@ -10,9 +10,12 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split
+import asyncio
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy import func, update
 
 from app.core.config import settings
 from app.models import Claim, ClaimStatus, MLModel, Provider
@@ -33,7 +36,7 @@ class MLService:
       - bill_claim_ratio    (ratio of total_claim_amount / total_bill_amount)
     """
 
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
         self.model_dir = os.path.join(settings.BASE_DIR, "ml_models")
         os.makedirs(self.model_dir, exist_ok=True)
@@ -65,28 +68,29 @@ class MLService:
             return max(days, 0)
         return 0
 
-    def _provider_rejection_rate(self, claim: Claim) -> float:
-        provider = claim.provider or (
-            self.db.query(Provider).filter(Provider.id == claim.provider_id).first()
-        )
+    async def _provider_rejection_rate(self, claim: Claim) -> float:
+        provider = claim.provider
+        if not provider:
+            result = await self.db.execute(select(Provider).filter(Provider.id == claim.provider_id))
+            provider = result.scalars().first()
+            
         if provider and (provider.total_claims_count or 0) > 0:
             return (provider.rejected_claims_count or 0) / provider.total_claims_count
         return 0.0
 
-    def _patient_claim_count_30d(self, claim: Claim) -> int:
+    async def _patient_claim_count_30d(self, claim: Claim) -> int:
         if not claim.patient_sha_number or not claim.visit_admission_date:
             return 0
         thirty_ago = claim.visit_admission_date - timedelta(days=30)
-        return (
-            self.db.query(func.count(Claim.id))
+        result = await self.db.execute(
+            select(func.count(Claim.id))
             .filter(
                 Claim.patient_sha_number == claim.patient_sha_number,
                 Claim.id != claim.id,
                 Claim.visit_admission_date >= thirty_ago,
             )
-            .scalar()
-            or 0
         )
+        return result.scalar() or 0
 
     def _bill_claim_ratio(self, claim: Claim) -> float:
         """
@@ -123,12 +127,12 @@ class MLService:
             return "standard"
         return "unknown"
 
-    def _build_feature_row(self, claim: Claim) -> Dict[str, Any]:
+    async def _build_feature_row(self, claim: Claim) -> Dict[str, Any]:
         return {
             "total_claim_amount": float(claim.total_claim_amount or 0),
             "length_of_stay": self._length_of_stay(claim),
-            "provider_rejection_rate": self._provider_rejection_rate(claim),
-            "patient_claim_count_30d": self._patient_claim_count_30d(claim),
+            "provider_rejection_rate": await self._provider_rejection_rate(claim),
+            "patient_claim_count_30d": await self._patient_claim_count_30d(claim),
             "bill_claim_ratio": self._bill_claim_ratio(claim),
             "benefit_line_count": len(claim.benefit_lines or []),
             "visit_type": (claim.visit_type or "unknown").lower(),
@@ -140,9 +144,9 @@ class MLService:
 
     # ── Training ──────────────────────────────────────────────────────────
 
-    def _extract_training_data(self) -> pd.DataFrame:
-        claims = (
-            self.db.query(Claim)
+    async def _extract_training_data(self) -> pd.DataFrame:
+        result = await self.db.execute(
+            select(Claim)
             .filter(
                 Claim.status.in_(
                     [
@@ -152,14 +156,14 @@ class MLService:
                     ]
                 )
             )
-            .all()
         )
+        claims = result.scalars().all()
         if not claims:
             return pd.DataFrame()
 
         rows = []
         for claim in claims:
-            row = self._build_feature_row(claim)
+            row = await self._build_feature_row(claim)
             # Label: 1 = fraud/risk, 0 = clean
             row["target"] = (
                 1
@@ -170,9 +174,9 @@ class MLService:
 
         return pd.DataFrame(rows)
 
-    def train_model(self) -> Dict[str, Any]:
+    async def train_model(self) -> Dict[str, Any]:
         """Train and persist a new fraud detection model."""
-        df = self._extract_training_data()
+        df = await self._extract_training_data()
         if df.empty or len(df) < 20:
             return {
                 "status": "failed",
@@ -236,8 +240,10 @@ class MLService:
         joblib.dump(pipeline, model_path)
 
         # Deactivate old models and register new one
-        self.db.query(MLModel).filter(MLModel.is_active == True).update(
-            {"is_active": False}
+        await self.db.execute(
+            update(MLModel)
+            .where(MLModel.is_active == True)
+            .values({"is_active": False})
         )
         db_model = MLModel(
             model_name=f"fraud_gb_{timestamp}",
@@ -254,19 +260,19 @@ class MLService:
             is_active=True,
         )
         self.db.add(db_model)
-        self.db.commit()
+        await self.db.commit()
 
         return {"status": "success", "model_id": db_model.id, "metrics": metrics}
 
     # ── Prediction ────────────────────────────────────────────────────────
 
-    def load_active_model(self) -> Optional[Pipeline]:
-        record = (
-            self.db.query(MLModel)
+    async def load_active_model(self) -> Optional[Pipeline]:
+        result = await self.db.execute(
+            select(MLModel)
             .filter(MLModel.is_active == True)
             .order_by(MLModel.created_at.desc())
-            .first()
         )
+        record = result.scalars().first()
         if not record or not os.path.exists(record.model_path):
             return None
         try:
@@ -275,13 +281,14 @@ class MLService:
             print(f"[MLService] Error loading model: {exc}")
             return None
 
-    def predict_claim_risk(self, claim: Claim) -> Dict[str, Any]:
+    async def predict_claim_risk(self, claim: Claim) -> Dict[str, Any]:
         """Return a fraud probability score (0–100) for a single claim."""
-        model = self.load_active_model()
+        model = await self.load_active_model()
         if not model:
             return {"error": "No active model available", "risk_score": 0.0}
 
-        input_df = pd.DataFrame([self._build_feature_row(claim)])
+        feature_row = await self._build_feature_row(claim)
+        input_df = pd.DataFrame([feature_row])
 
         try:
             probability = model.predict_proba(input_df)[0][1]
