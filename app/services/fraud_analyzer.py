@@ -3,7 +3,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
 from app.models import Claim, ClaimStatus, FraudAlert
 from app.services.duplicate_detector import DuplicateDetector
@@ -34,7 +35,7 @@ class FraudAnalyzer:
         "ml_model": 0.7,  # ML score is useful but not deterministic
     }
 
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
 
     async def analyze_claim(self, claim: Claim) -> Dict[str, Any]:
@@ -55,7 +56,7 @@ class FraudAnalyzer:
 
         # ── ML prediction (synchronous CPU-bound, run first) ──────────────
         ml_service = MLService(self.db)
-        ml_result = ml_service.predict_claim_risk(claim)
+        ml_result = await ml_service.predict_claim_risk(claim)
         ml_score = ml_result.get("risk_score", 0.0)
         results["ml_score"] = ml_score
         results["modules"]["ml_model"] = {
@@ -195,9 +196,9 @@ class FraudAnalyzer:
 
         severity = "critical" if results["composite_risk_score"] >= 80 else "high"
 
-        existing = (
-            self.db.query(FraudAlert).filter(FraudAlert.claim_id == claim.id).first()
-        )
+        result = await self.db.execute(select(FraudAlert).filter(FraudAlert.claim_id == claim.id))
+        existing = result.scalars().first()
+        
         if existing:
             existing.severity = severity
             existing.evidence = results
@@ -220,7 +221,7 @@ class FraudAnalyzer:
                 )
             )
 
-        self.db.commit()
+        await self.db.commit()
 
 
 # ===========================================================================
@@ -235,35 +236,35 @@ async def analyze_claim_background(claim_id: int) -> None:
     """
     from app.core.database import AsyncSessionLocal
 
-    db = AsyncSessionLocal()
-    try:
-        claim = db.query(Claim).filter(Claim.id == claim_id).first()
-        if not claim:
-            print(f"[fraud_analyzer] Claim {claim_id} not found — skipping")
-            return
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await db.execute(select(Claim).filter(Claim.id == claim_id))
+            claim = result.scalars().first()
+            
+            if not claim:
+                print(f"[fraud_analyzer] Claim {claim_id} not found — skipping")
+                return
 
-        analyzer = FraudAnalyzer(db)
-        result = await analyzer.analyze_claim(claim)
+            analyzer = FraudAnalyzer(db)
+            result_data = await analyzer.analyze_claim(claim)
 
-        claim.risk_score = result["composite_risk_score"]
-        claim.is_flagged = result["composite_risk_score"] >= 60
-        claim.status = result["final_status"]
-        claim.fraud_flags = [
-            flag
-            for module_result in result["modules"].values()
-            for flag in (module_result.get("flags") or [])
-        ]
-        claim.analysis_completed_at = result["analyzed_at"]
-        db.commit()
+            claim.risk_score = result_data["composite_risk_score"]
+            claim.is_flagged = result_data["composite_risk_score"] >= 60
+            claim.status = result_data["final_status"]
+            claim.fraud_flags = [
+                flag
+                for module_result in result_data["modules"].values()
+                for flag in (module_result.get("flags") or [])
+            ]
+            claim.analysis_completed_at = result_data["analyzed_at"]
+            await db.commit()
 
-        print(
-            f"[fraud_analyzer] Claim {claim_id} analysed — "
-            f"score: {result['composite_risk_score']:.1f} | "
-            f"status: {result['final_status']}"
-        )
+            print(
+                f"[fraud_analyzer] Claim {claim_id} analysed — "
+                f"score: {result_data['composite_risk_score']:.1f} | "
+                f"status: {result_data['final_status']}"
+            )
 
-    except Exception as exc:
-        print(f"[fraud_analyzer] Error analysing claim {claim_id}: {exc}")
-        db.rollback()
-    finally:
-        db.close()
+        except Exception as exc:
+            print(f"[fraud_analyzer] Error analysing claim {claim_id}: {exc}")
+            await db.rollback()

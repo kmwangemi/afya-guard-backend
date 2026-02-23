@@ -2,7 +2,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
 from app.models.claim_model import Claim
 from app.models.enums_model import FraudSeverity
@@ -22,7 +23,7 @@ class ProviderProfiler:
     # High-value accommodation types that carry elevated fraud risk
     HIGH_VALUE_ACCOMMODATION = {"icu", "hdu", "nicu", "burns"}
 
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
 
     async def analyze_claim(self, claim: Claim) -> Dict[str, Any]:
@@ -30,10 +31,10 @@ class ProviderProfiler:
         flags: List[Dict[str, Any]] = []
         risk_score = 0.0
 
-        # Resolve provider — prefer the ORM relationship, fall back to query
-        provider = claim.provider or (
-            self.db.query(Provider).filter(Provider.id == claim.provider_id).first()
-        )
+        provider = claim.provider
+        if not provider:
+            result = await self.db.execute(select(Provider).filter(Provider.id == claim.provider_id))
+            provider = result.scalars().first()
 
         if not provider:
             return {
@@ -115,15 +116,15 @@ class ProviderProfiler:
                 if claim.visit_admission_date
                 else datetime.utcnow() - timedelta(days=90)
             )
-            avg_result = (
-                self.db.query(func.avg(Claim.total_claim_amount))
+            result = await self.db.execute(
+                select(func.avg(Claim.total_claim_amount))
                 .filter(
                     Claim.provider_id == provider.id,
                     Claim.id != claim.id,
                     Claim.visit_admission_date >= ninety_days_ago,
                 )
-                .scalar()
             )
+            avg_result = result.scalar()
 
             if avg_result and float(avg_result) > 0:
                 ratio = float(claim.total_claim_amount) / float(avg_result)
@@ -174,16 +175,15 @@ class ProviderProfiler:
                     if claim.visit_admission_date
                     else datetime.utcnow() - timedelta(days=30)
                 )
-                high_value_count = (
-                    self.db.query(func.count(Claim.id))
+                result = await self.db.execute(
+                    select(func.count(Claim.id))
                     .filter(
                         Claim.provider_id == provider.id,
                         Claim.accommodation_type.ilike(accom),
                         Claim.visit_admission_date >= thirty_days_ago,
                     )
-                    .scalar()
-                    or 0
                 )
+                high_value_count = result.scalar() or 0
                 if high_value_count > 20:
                     risk_score += 50.0
                     flags.append(
