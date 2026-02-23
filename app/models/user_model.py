@@ -67,6 +67,11 @@ class User(Base):
     approved_claims: Mapped[List["Claim"]] = relationship(
         "Claim", back_populates="approved_by_user", foreign_keys="Claim.approved_by"
     )
+    submitted_claims: Mapped[list["Claim"]] = relationship(
+        "Claim",
+        foreign_keys="[Claim.submitted_by]",
+        back_populates="submitted_by_user",
+    )
 
     def __repr__(self) -> str:
         return f"<User(id={self.id}, email={self.email}, role={self.role})>"
