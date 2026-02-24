@@ -13,10 +13,7 @@ from typing import List, Optional
 
 import cloudinary
 import cloudinary.uploader
-import httpx
 import pandas as pd
-import asyncio
-import aiofiles
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -26,8 +23,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
@@ -83,10 +79,29 @@ CLOUDINARY_RESOURCE_TYPES = {
 # ---------------------------------------------------------------------------
 
 
-def _upload_to_cloudinary(file: UploadFile, user_id: int, ext: str) -> dict:
+def _save_to_temp(file: UploadFile, ext: str) -> str:
     """
-    Stream the uploaded file to Cloudinary via a short-lived temp file.
-    The temp file is deleted immediately after upload.
+    Write the uploaded file to a local temp file and return the path.
+    Caller is responsible for deleting the file after use.
+    """
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            return tmp.name
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to buffer upload: {exc}",
+        )
+
+
+def _upload_to_cloudinary(
+    tmp_path: str, user_id: uuid.UUID, ext: str, original_filename: str
+) -> dict:
+    """
+    Upload a local temp file to Cloudinary.
+    Signature changed: accepts tmp_path directly so the caller controls
+    the temp file lifetime and can extract from it before this call or after.
 
     Folder structure on Cloudinary:
         sha_claims/<user_id>/<uuid4>
@@ -96,58 +111,20 @@ def _upload_to_cloudinary(file: UploadFile, user_id: int, ext: str) -> dict:
     """
     public_id = f"sha_claims/{user_id}/{uuid.uuid4().hex}"
     resource_type = CLOUDINARY_RESOURCE_TYPES.get(ext, "raw")
-
-    tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            shutil.copyfileobj(file.file, tmp)
-            tmp_path = tmp.name
-
         result = cloudinary.uploader.upload(
             tmp_path,
             public_id=public_id,
             resource_type=resource_type,
             tags=[f"user_{user_id}", "sha_claim"],
-            context={"original_filename": file.filename},
+            context={"original_filename": original_filename},
         )
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Cloudinary upload failed: {exc}",
         )
-    finally:
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
-
     return result
-
-
-async def _download_from_cloudinary(secure_url: str, ext: str) -> str:
-    """
-    Download a Cloudinary file to a local temp file for extraction/parsing.
-    Returns the temp file path. Caller must delete it after use.
-    """
-
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-            tmp_path = tmp.name
-            
-        async with httpx.AsyncClient() as client:
-            async with client.stream("GET", secure_url) as response:
-                response.raise_for_status()
-                async with aiofiles.open(tmp_path, 'wb') as out_file:
-                    async for chunk in response.aiter_bytes():
-                        await out_file.write(chunk)
-    except Exception as exc:
-        if tmp_path:
-            Path(tmp_path).unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to retrieve file from Cloudinary: {exc}",
-        )
-
-    return tmp_path
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +135,7 @@ async def _download_from_cloudinary(secure_url: str, ext: str) -> str:
 @router.post("/upload-and-extract", response_model=ExtractResponse)
 async def upload_and_extract(
     file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -181,28 +158,32 @@ async def upload_and_extract(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
         )
-
-    # ── 1. Upload to Cloudinary ───────────────────────────────────────────
-    cloudinary_result = await asyncio.to_thread(_upload_to_cloudinary, file, current_user.id, ext)
-    secure_url = cloudinary_result["secure_url"]
-    public_id = cloudinary_result["public_id"]
-    file_size = cloudinary_result["bytes"]
-
-    # ── 2. Download to temp file for extraction ───────────────────────────
-    tmp_path = await _download_from_cloudinary(secure_url, ext)
-
+    # ── 1. Write upload to a local temp file ─────────────────────────────
+    # We keep the file locally for extraction first, then push to Cloudinary.
+    # This avoids the need to download back from Cloudinary (which requires
+    # signed URLs for raw resources and adds unnecessary latency).
+    tmp_path = _save_to_temp(file, ext)
     try:
-        claim_data: SHAClaimData = await asyncio.to_thread(sha_claim_extractor.extract_from_file, tmp_path)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Extraction failed: {exc}",
+        # ── 2. Extract from the local temp file ───────────────────────────
+        try:
+            claim_data: SHAClaimData = sha_claim_extractor.extract_from_file(tmp_path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Extraction failed: {exc}",
+            )
+        # ── 3. Upload to Cloudinary for permanent storage ─────────────────
+        cloudinary_result = _upload_to_cloudinary(
+            tmp_path, current_user.id, ext, file.filename
         )
+        secure_url = cloudinary_result["secure_url"]
+        public_id = cloudinary_result["public_id"]
+        file_size = cloudinary_result["bytes"]
     finally:
-        Path(tmp_path).unlink(missing_ok=True)  # always clean up
+        # Always delete the temp file regardless of success or failure
+        Path(tmp_path).unlink(missing_ok=True)
 
     is_valid, validation_errors = sha_claim_extractor.validate(claim_data)
-
     return {
         "cloudinary_public_id": public_id,
         "cloudinary_url": secure_url,
@@ -222,7 +203,7 @@ async def upload_and_extract(
 async def submit_claim(
     claim_data: ClaimCreate,
     background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -231,10 +212,11 @@ async def submit_claim(
     `claim_data` must include the `cloudinary_public_id` and `cloudinary_url`
     returned by /upload-and-extract so the Claim row links back to the source file.
     """
-    result = await db.execute(
-        select(Provider).filter(Provider.provider_id == claim_data.provider_id)
+    provider = (
+        db.query(Provider)
+        .filter(Provider.provider_id == claim_data.provider_id)
+        .first()
     )
-    provider = result.scalars().first()
     if not provider:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -243,9 +225,7 @@ async def submit_claim(
                 "Register the provider before submitting claims."
             ),
         )
-
     claim_number = sha_claim_extractor.generate_claim_number(claim_data.provider_id)
-
     db_claim = Claim(
         claim_number=claim_number,
         # Cloudinary file reference — stored on every claim for audit trail
@@ -300,13 +280,10 @@ async def submit_claim(
         submission_date=datetime.utcnow(),
         status=ClaimStatus.PROCESSING,
     )
-
     db.add(db_claim)
-    await db.commit()
-    await db.refresh(db_claim)
-
+    db.commit()
+    db.refresh(db_claim)
     background_tasks.add_task(analyze_claim_background, db_claim.id)
-
     return db_claim
 
 
@@ -318,13 +295,12 @@ async def submit_claim(
 @router.post("/bulk-upload", response_model=BulkUploadResponse)
 async def bulk_upload_claims(
     file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
     background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Bulk upload claims from a CSV or Excel file.
-
     Flow:
       1. Upload the bulk file to Cloudinary (audit trail)
       2. Download it to a temp file for pandas parsing
@@ -338,28 +314,26 @@ async def bulk_upload_claims(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Bulk upload accepts CSV or Excel files only.",
         )
-
-    # ── 1. Upload bulk file to Cloudinary ────────────────────────────────
-    cloudinary_result = await asyncio.to_thread(_upload_to_cloudinary, file, current_user.id, ext)
-    bulk_file_url = cloudinary_result["secure_url"]
-    bulk_file_public_id = cloudinary_result["public_id"]
-
-    # ── 2. Download and parse ────────────────────────────────────────────
-    tmp_path = await _download_from_cloudinary(bulk_file_url, ext)
+    # ── 1. Write to local temp file ──────────────────────────────────────
+    tmp_path = _save_to_temp(file, ext)
     try:
-        def read_file(path, is_csv):
-            return pd.read_csv(path) if is_csv else pd.read_excel(path)
-        
-        df = await asyncio.to_thread(read_file, tmp_path, ext == ".csv")
-        df = df.fillna("")
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Could not parse file: {exc}",
+        # ── 2. Parse with pandas from the local temp file ─────────────────
+        try:
+            df = pd.read_csv(tmp_path) if ext == ".csv" else pd.read_excel(tmp_path)
+            df = df.fillna("")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Could not parse file: {exc}",
+            )
+        # ── 3. Upload to Cloudinary for audit trail ────────────────────────
+        cloudinary_result = _upload_to_cloudinary(
+            tmp_path, current_user.id, ext, file.filename
         )
+        bulk_file_url = cloudinary_result["secure_url"]
+        bulk_file_public_id = cloudinary_result["public_id"]
     finally:
         Path(tmp_path).unlink(missing_ok=True)
-
     # ── 3. Validate columns ──────────────────────────────────────────────
     required_cols = {
         "provider_id",
@@ -375,7 +349,6 @@ async def bulk_upload_claims(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Missing required columns: {sorted(missing_cols)}",
         )
-
     valid_visit_types = {"inpatient", "outpatient", "day-care", "day care"}
     invalid_rows = df[~df["visit_type"].str.lower().isin(valid_visit_types)]
     if not invalid_rows.empty:
@@ -386,16 +359,17 @@ async def bulk_upload_claims(
                 "Must be one of: Inpatient, Outpatient, Day-care"
             ),
         )
-
     # ── 4. Insert claims ─────────────────────────────────────────────────
     claim_ids: List[int] = []
     errors: List[dict] = []
-
     for idx, row in df.iterrows():
         row_num = int(idx) + 2
         try:
-            result = await db.execute(select(Provider).filter(Provider.provider_id == row["provider_id"]))
-            provider = result.scalars().first()
+            provider = (
+                db.query(Provider)
+                .filter(Provider.provider_id == row["provider_id"])
+                .first()
+            )
             if not provider:
                 errors.append(
                     {
@@ -404,11 +378,9 @@ async def bulk_upload_claims(
                     }
                 )
                 continue
-
             claim_number = sha_claim_extractor.generate_claim_number(
                 str(row["provider_id"])
             )
-
             db_claim = Claim(
                 claim_number=claim_number,
                 # Every row links to the same bulk file on Cloudinary
@@ -454,18 +426,14 @@ async def bulk_upload_claims(
                 submission_date=datetime.utcnow(),
                 status=ClaimStatus.PROCESSING,
             )
-
             db.add(db_claim)
-            await db.commit()
-            await db.refresh(db_claim)
-
+            db.commit()
+            db.refresh(db_claim)
             claim_ids.append(db_claim.id)
             background_tasks.add_task(analyze_claim_background, db_claim.id)
-
         except Exception as exc:
-            await db.rollback()
+            db.rollback()
             errors.append({"row": row_num, "error": str(exc)})
-
     return {
         "uploaded_count": len(claim_ids),
         "claim_ids": claim_ids,
@@ -492,12 +460,11 @@ async def list_claims(
     date_to: Optional[datetime] = None,
     limit: int = 50,
     offset: int = 0,
-    db: AsyncSession = Depends(get_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """List claims with optional filters. Max 200 results per page."""
-    query = select(Claim)
-
+    query = db.query(Claim)
     if claim_status:
         query = query.filter(Claim.status == claim_status)
     if is_flagged is not None:
@@ -508,10 +475,12 @@ async def list_claims(
         query = query.filter(Claim.visit_admission_date >= date_from)
     if date_to:
         query = query.filter(Claim.visit_admission_date <= date_to)
-
-    query = query.order_by(Claim.submission_date.desc()).offset(offset).limit(min(limit, 200))
-    result = await db.execute(query)
-    return result.scalars().all()
+    return (
+        query.order_by(Claim.submission_date.desc())
+        .offset(offset)
+        .limit(min(limit, 200))
+        .all()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -522,12 +491,11 @@ async def list_claims(
 @router.get("/{claim_id}", response_model=ClaimDetailResponse)
 async def get_claim(
     claim_id: int,
-    db: AsyncSession = Depends(get_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Retrieve full details for a single claim, including its Cloudinary file URL."""
-    result = await db.execute(select(Claim).filter(Claim.id == claim_id))
-    claim = result.scalars().first()
+    claim = db.query(Claim).filter(Claim.id == claim_id).first()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
@@ -543,17 +511,15 @@ async def get_claim(
 @router.get("/{claim_id}/risk-score", response_model=RiskScoreResponse)
 async def get_claim_risk_score(
     claim_id: int,
-    db: AsyncSession = Depends(get_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Return the fraud risk score and flag details for a claim."""
-    result = await db.execute(select(Claim).filter(Claim.id == claim_id))
-    claim = result.scalars().first()
+    claim = db.query(Claim).filter(Claim.id == claim_id).first()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
         )
-
     return {
         "claim_id": claim.id,
         "claim_number": claim.claim_number,
@@ -574,17 +540,15 @@ async def get_claim_risk_score(
 async def update_claim_status(
     claim_id: int,
     update_data: ClaimUpdate,
-    db: AsyncSession = Depends(get_db),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Update a claim's status, processing notes, or approval details."""
-    result = await db.execute(select(Claim).filter(Claim.id == claim_id))
-    claim = result.scalars().first()
+    claim = db.query(Claim).filter(Claim.id == claim_id).first()
     if not claim:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found"
         )
-
     if update_data.status:
         claim.status = update_data.status
     if update_data.processing_notes:
@@ -600,7 +564,6 @@ async def update_claim_status(
         claim.approved_at = datetime.utcnow()
     if update_data.rejection_reason:
         claim.rejection_reason = update_data.rejection_reason
-
-    await db.commit()
-    await db.refresh(claim)
+    db.commit()
+    db.refresh(claim)
     return claim
