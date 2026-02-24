@@ -144,7 +144,7 @@ async def login(
         expires_delta=access_token_expires,
     )
     return TokenResponse(
-        token=access_token,
+        access_token=access_token,
         token_type="bearer",
         user=UserResponse(
             id=existing_user.id,

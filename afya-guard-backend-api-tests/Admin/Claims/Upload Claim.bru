@@ -1,0 +1,19 @@
+meta {
+  name: Upload Claim
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{local_url}}/claims/upload-and-extract
+  body: multipartForm
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:multipart-form {
+  file: @file(/home/kmwangemi/Desktop/PERSONAL/NIRU HACKATHON/DOCS/SHA/SHA CLAIM FORM/SHA_Claims_Form.pdf)
+}
