@@ -20,15 +20,30 @@ uv sync
 
 This will create a virtual environment and install all packages from your `pyproject.toml` or `requirements.txt`.
 
+Or if you are using `uv`, it is already included in the project dependencies via `uv sync`.
+
+Verify both are correctly wired together:
+
+---
+
 ### 3. Set up environment variables
 
-Create a `.env` file in the project root with your database configuration:
+Create a `.env` file in the project root with your configuration:
 
-```bash
+# Database
+
 DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/your_database
+
+# Auth
+
 SECRET_KEY=your-secret-key-here
 ACCESS_TOKEN_EXPIRE_MINUTES=30
-```
+
+# Cloudinary (file storage)
+
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=your-api-key
+CLOUDINARY_API_SECRET=your-api-secret
 
 ### 4. Initialize Alembic (First time only)
 
@@ -50,15 +65,17 @@ alembic upgrade head
 
 **Note:** Always run migrations before starting the application, especially after pulling new code or creating new models.
 
-## 6. Running project in your dev machine
+---
 
-Run
+## 6. Running the project in your dev machine
 
 ```bash
 uv run fastapi dev app/main.py
 ```
 
-Access it at `localhost:8000`
+Access it at `http://localhost:8000`
+
+API docs available at `http://localhost:8000/docs`
 
 ## Working with Database Migrations
 

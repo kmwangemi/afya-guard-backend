@@ -41,7 +41,6 @@ from app.schemas.claim_schema import (
     ExtractResponse,
     RiskScoreResponse,
 )
-from app.services.claim_extractor import SHAClaimData, sha_claim_extractor
 from app.services.fraud_analyzer import analyze_claim_background
 
 router = APIRouter()
@@ -126,72 +125,6 @@ def _upload_to_cloudinary(
         )
     return result
 
-
-# ---------------------------------------------------------------------------
-# POST /upload-and-extract
-# ---------------------------------------------------------------------------
-
-
-@router.post("/upload-and-extract", response_model=ExtractResponse)
-async def upload_and_extract(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Upload a SHA claim file to Cloudinary and immediately extract structured data.
-
-    Flow:
-      1. Validate file extension
-      2. Upload file to Cloudinary  →  stored permanently at sha_claims/<user_id>/
-      3. Download file from Cloudinary to a short-lived temp file
-      4. Run SHAClaimExtractor on the temp file
-      5. Delete temp file
-      6. Return extracted data + Cloudinary references to the frontend
-
-    The frontend must store `cloudinary_public_id` and `cloudinary_url` and
-    pass them back in the /submit request so the DB record links to the file.
-    """
-    ext = Path(file.filename).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
-        )
-    # ── 1. Write upload to a local temp file ─────────────────────────────
-    # We keep the file locally for extraction first, then push to Cloudinary.
-    # This avoids the need to download back from Cloudinary (which requires
-    # signed URLs for raw resources and adds unnecessary latency).
-    tmp_path = _save_to_temp(file, ext)
-    try:
-        # ── 2. Extract from the local temp file ───────────────────────────
-        try:
-            claim_data: SHAClaimData = sha_claim_extractor.extract_from_file(tmp_path)
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Extraction failed: {exc}",
-            )
-        # ── 3. Upload to Cloudinary for permanent storage ─────────────────
-        cloudinary_result = _upload_to_cloudinary(
-            tmp_path, current_user.id, ext, file.filename
-        )
-        secure_url = cloudinary_result["secure_url"]
-        public_id = cloudinary_result["public_id"]
-        file_size = cloudinary_result["bytes"]
-    finally:
-        # Always delete the temp file regardless of success or failure
-        Path(tmp_path).unlink(missing_ok=True)
-
-    is_valid, validation_errors = sha_claim_extractor.validate(claim_data)
-    return {
-        "cloudinary_public_id": public_id,
-        "cloudinary_url": secure_url,
-        "file_size": file_size,
-        "extracted": claim_data.to_dict(),
-        "is_valid": is_valid,
-        "validation_errors": validation_errors,
-    }
 
 
 # ---------------------------------------------------------------------------

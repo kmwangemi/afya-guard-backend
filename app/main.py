@@ -2,8 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.routers.auth_router import auth_router
-
 from app.api.v1.routers.claim_router import router as claim_router
+from app.api.v1.routers.simulation_router import router as simulation_router
 
 
 app = FastAPI(
@@ -46,4 +46,9 @@ app.include_router(
     auth_router,
     prefix=f"{BASE_URL_PREFIX}",
     tags=["Users - Authentication"],
+)
+app.include_router(
+    simulation_router,
+    prefix=f"{BASE_URL_PREFIX}/simulation",
+    tags=["Simulation"],
 )

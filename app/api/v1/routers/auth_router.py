@@ -20,7 +20,8 @@ from app.core.config import settings
 from app.core.database import get_db
 
 # from src.rate_limiter import limiter
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import create_access_token, create_refresh_token, hash_password, verify_password
+import jwt
 from app.models.user_model import User
 from app.schemas.user_schema import TokenResponse, UserCreate, UserResponse
 
@@ -140,11 +141,17 @@ async def login(
     # Create access token with user ID as subject
     access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
     access_token = create_access_token(
-        data={"sub": str(existing_user.id)},
+        data={"sub": str(existing_user.id), "role": existing_user.role},
         expires_delta=access_token_expires,
+    )
+    refresh_token_expires = timedelta(days=settings.refresh_token_expire_days)
+    refresh_token = create_refresh_token(
+        data={"sub": str(existing_user.id), "role": existing_user.role},
+        expires_delta=refresh_token_expires,
     )
     return TokenResponse(
         access_token=access_token,
+        refresh_token=refresh_token,
         token_type="bearer",
         user=UserResponse(
             id=existing_user.id,
@@ -158,6 +165,23 @@ async def login(
             updated_at=existing_user.updated_at,
         ),
     )
+
+
+@auth_router.post("/refresh")
+def refresh_token(refresh_token: str, db: DbDependency):
+    try:
+        payload = jwt.decode(refresh_token, settings.secret_key.get_secret_value(), algorithms=[settings.algorithm])
+        user_id = payload.get("sub")
+        token_type = payload.get("type")
+        if token_type != "refresh":
+            raise HTTPException(status_code=401)
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401)
+    new_access_token = create_access_token(
+        data={"sub": user_id},
+        expires_delta=timedelta(minutes=settings.access_token_expire_minutes)
+    )
+    return {"access_token": new_access_token}
 
 
 @auth_router.post("/registration", response_model=UserResponse)
