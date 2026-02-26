@@ -40,7 +40,8 @@ class PhantomPatientDetector:
         flags: List[Dict[str, Any]] = []
         risk_score = 0.0
 
-        if not claim.patient_sha_number:
+        patient_sha = claim.raw_payload.get("sha_number") if claim.raw_payload else None
+        if not patient_sha:
             return {
                 "module": "phantom_patient",
                 "risk_score": 50.0,
@@ -56,7 +57,7 @@ class PhantomPatientDetector:
             }
 
         # ── 1. SHA registry verification (40 points) ─────────────────────
-        registry_result = await self._verify_with_sha_registry(claim.patient_sha_number)
+        registry_result = await self._verify_with_sha_registry(patient_sha)
 
         if not registry_result["exists"]:
             risk_score += 40.0
@@ -66,7 +67,7 @@ class PhantomPatientDetector:
                     "severity": FraudSeverity.CRITICAL,
                     "description": "SHA member number not found in the SHA registry",
                     "score": 40.0,
-                    "evidence": {"sha_number": claim.patient_sha_number},
+                    "evidence": {"sha_number": patient_sha},
                 }
             )
 
@@ -82,7 +83,7 @@ class PhantomPatientDetector:
                     ),
                     "score": 40.0,
                     "evidence": {
-                        "sha_number": claim.patient_sha_number,
+                        "sha_number": patient_sha,
                         "death_date": registry_result.get("death_date"),
                     },
                 }
@@ -109,7 +110,7 @@ class PhantomPatientDetector:
             flags.append(plausibility)
 
         # ── 4. Excessive visit frequency (up to 20 points) ────────────────
-        freq = await self._analyze_visit_frequency(claim.patient_sha_number)
+        freq = await self._analyze_visit_frequency(patient_sha)
         if freq["is_excessive"]:
             risk_score += freq["score"]
             flags.append(
@@ -140,8 +141,8 @@ class PhantomPatientDetector:
                         ),
                         "score": 15.0,
                         "evidence": {
-                            "claim_last_name": claim.patient_last_name,
-                            "claim_first_name": claim.patient_first_name,
+                            "claim_last_name": claim.raw_payload.get("patient_last_name") if claim.raw_payload else None,
+                            "claim_first_name": claim.raw_payload.get("patient_first_name") if claim.raw_payload else None,
                             "registry_name": registry_result.get("full_name"),
                         },
                     }
@@ -212,7 +213,7 @@ class PhantomPatientDetector:
         Flag if the SHA member has another claim at a different county
         on the same admission date — physically impossible.
         """
-        if not claim.visit_admission_date:
+        if not claim.admission_date:
             return {"is_impossible": False}
 
         current_provider = claim.provider
@@ -222,14 +223,15 @@ class PhantomPatientDetector:
         if not current_provider or not getattr(current_provider, "county", None):
             return {"is_impossible": False}
 
+        patient_sha = claim.raw_payload.get("sha_number") if claim.raw_payload else None
         result = await self.db.execute(
             select(Claim)
             .join(Provider, Claim.provider_id == Provider.id)
             .filter(
-                Claim.patient_sha_number == claim.patient_sha_number,
+                Claim.raw_payload["sha_number"].as_string() == patient_sha,
                 Claim.provider_id != claim.provider_id,
-                func.date(Claim.visit_admission_date)
-                == func.date(claim.visit_admission_date),
+                func.date(Claim.admission_date)
+                == func.date(claim.admission_date),
             )
         )
         same_day_claims = result.scalars().all()
@@ -238,7 +240,7 @@ class PhantomPatientDetector:
             if other.provider and other.provider.county != current_provider.county:
                 hours_apart = abs(
                     (
-                        other.visit_admission_date - claim.visit_admission_date
+                        other.admission_date - claim.admission_date
                     ).total_seconds()
                     / 3600
                 )
@@ -253,13 +255,13 @@ class PhantomPatientDetector:
                         "claim_1": {
                             "provider": current_provider.name,
                             "county": current_provider.county,
-                            "admission": claim.visit_admission_date.isoformat(),
+                            "admission": claim.admission_date.isoformat(),
                         },
                         "claim_2": {
-                            "claim_number": other.claim_number,
+                            "claim_number": other.sha_claim_id,
                             "provider": other.provider.name,
                             "county": other.provider.county,
-                            "admission": other.visit_admission_date.isoformat(),
+                            "admission": other.admission_date.isoformat(),
                         },
                         "hours_apart": round(hours_apart, 1),
                     },
@@ -290,11 +292,12 @@ class PhantomPatientDetector:
             except Exception:
                 pass
 
-        # Collect all ICD-11 codes: top-level + per benefit-line
         all_icd_codes: List[str] = []
-        if claim.icd11_code:
-            all_icd_codes.append(claim.icd11_code)
-        for line in claim.benefit_lines or []:
+        icd11 = claim.raw_payload.get("icd11_code") if claim.raw_payload else None
+        if icd11:
+            all_icd_codes.append(icd11)
+        benefit_lines = claim.raw_payload.get("benefit_lines") if claim.raw_payload else []
+        for line in benefit_lines or []:
             code = line.get("icd11_procedure_code") or ""
             if code:
                 all_icd_codes.append(code)
@@ -325,7 +328,7 @@ class PhantomPatientDetector:
             "59612",
             "59614",
         }
-        for line in claim.benefit_lines or []:
+        for line in benefit_lines or []:
             proc_code = (line.get("icd11_procedure_code") or "").strip()
             if proc_code in delivery_codes:
                 if gender == "M":
@@ -376,8 +379,8 @@ class PhantomPatientDetector:
         result = await self.db.execute(
             select(func.count(Claim.id))
             .filter(
-                Claim.patient_sha_number == sha_number,
-                Claim.visit_admission_date >= thirty_days_ago,
+                Claim.raw_payload["sha_number"].as_string() == sha_number,
+                Claim.admission_date >= thirty_days_ago,
             )
         )
         count = result.scalar() or 0
@@ -411,8 +414,8 @@ class PhantomPatientDetector:
         registry full_name. Returns True if names are consistent.
         """
         registry_name = (registry_data.get("full_name") or "").lower()
-        claim_last = (claim.patient_last_name or "").lower().strip()
-        claim_first = (claim.patient_first_name or "").lower().strip()
+        claim_last = (claim.raw_payload.get("patient_last_name") or "").lower().strip() if claim.raw_payload else ""
+        claim_first = (claim.raw_payload.get("patient_first_name") or "").lower().strip() if claim.raw_payload else ""
 
         if not registry_name or not claim_last:
             return True  # Cannot determine mismatch without both sides

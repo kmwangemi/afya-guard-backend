@@ -6,7 +6,6 @@ SQLALCHEMY_DATABASE_URL = settings.database_url
 
 engine = create_async_engine(
     SQLALCHEMY_DATABASE_URL,
-    # connect_args={"check_same_thread": False}
     echo=True,
     future=True,
     pool_size=20,

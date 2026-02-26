@@ -257,7 +257,7 @@ class ClaimResponse(BaseModel):
 
     # Identity
     id: uuid.UUID
-    claim_number: str
+    claim_number: str = Field(..., validation_alias="sha_claim_id")
 
     # Cloudinary
     source_file_url: Optional[str] = None
@@ -319,7 +319,7 @@ class ClaimResponse(BaseModel):
     analysis_completed_at: Optional[datetime] = None
 
     # Processing
-    status: ClaimStatus
+    status: ClaimStatus = Field(..., validation_alias="sha_status")
     processing_notes: Optional[str] = None
     approved_amount: Optional[Decimal] = None
     approved_by: Optional[uuid.UUID] = None
@@ -328,13 +328,46 @@ class ClaimResponse(BaseModel):
 
     # Submission tracking
     submitted_by: Optional[uuid.UUID] = None
-    submission_date: datetime
+    submission_date: Optional[datetime] = Field(None, validation_alias="submitted_at")
 
     # Timestamps
     created_at: datetime
     updated_at: datetime
 
-    model_config = {"from_attributes": True}
+    @model_validator(mode="after")
+    def populate_from_raw_payload(self) -> "ClaimResponse":
+        """
+        If we are loading from a Claim model object, pull missing fields 
+        from raw_payload to satisfy the frontend API contract.
+        """
+        if self.raw_payload:
+            raw = self.raw_payload
+            # Map common patient fields
+            if not self.patient_sha_number:
+                self.patient_sha_number = raw.get("sha_number")
+            if not self.patient_last_name:
+                self.patient_last_name = raw.get("patient_last_name")
+            if not self.patient_first_name:
+                self.patient_first_name = raw.get("patient_first_name")
+            
+            # Map analysis results if they exist in raw_payload
+            analysis = raw.get("analysis_result", {})
+            if not self.risk_score:
+                self.risk_score = analysis.get("risk_score", 0.0)
+            if not self.is_flagged:
+                self.is_flagged = analysis.get("is_flagged", False)
+            if not self.fraud_flags:
+                self.fraud_flags = analysis.get("fraud_flags")
+            if not self.analysis_completed_at:
+                completed_at = analysis.get("analysis_completed_at")
+                if completed_at:
+                    try:
+                        self.analysis_completed_at = datetime.fromisoformat(completed_at)
+                    except: pass
+
+        return self
+
+    model_config = {"from_attributes": True, "populate_by_name": True}
 
 
 # ===========================================================================
@@ -437,7 +470,33 @@ class RiskScoreResponse(BaseModel):
         description="None if fraud analysis has not yet completed",
     )
 
-    model_config = {"from_attributes": True}
+    @model_validator(mode="before")
+    @classmethod
+    def populate_risk_from_raw_payload(cls, data: Any) -> Any:
+        if hasattr(data, "raw_payload") and data.raw_payload:
+            analysis = data.raw_payload.get("analysis_result", {})
+            if not getattr(data, "risk_score", 0.0):
+                setattr(data, "risk_score", analysis.get("risk_score", 0.0))
+            if not getattr(data, "is_flagged", False):
+                setattr(data, "is_flagged", analysis.get("is_flagged", False))
+            if not getattr(data, "fraud_flags", None):
+                setattr(data, "fraud_flags", analysis.get("fraud_flags"))
+            
+            completed_at = analysis.get("analysis_completed_at")
+            if completed_at and not getattr(data, "analysis_completed_at", None):
+                try:
+                    setattr(data, "analysis_completed_at", datetime.fromisoformat(completed_at))
+                except: pass
+        
+        # Identity mapping
+        if hasattr(data, "sha_claim_id") and not hasattr(data, "claim_number"):
+            setattr(data, "claim_number", data.sha_claim_id)
+        if hasattr(data, "sha_status") and not hasattr(data, "status"):
+            setattr(data, "status", data.sha_status)
+
+        return data
+
+    model_config = {"from_attributes": True, "populate_by_name": True}
 
 
 # ===========================================================================

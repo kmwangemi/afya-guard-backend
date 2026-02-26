@@ -50,6 +50,13 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 
+def create_refresh_token(data: dict, expires_delta: timedelta):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + expires_delta
+    to_encode.update({"exp": expire, "type": "refresh"})
+    return jwt.encode(to_encode, settings.secret_key.get_secret_value(), algorithm=settings.algorithm)
+
+
 def verify_access_token(token: str) -> str | None:
     """Verifies the access token and returns the payload if valid."""
     try:

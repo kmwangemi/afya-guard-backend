@@ -103,7 +103,7 @@ class ProviderProfiler:
                     "severity": FraudSeverity.HIGH,
                     "description": "Provider is flagged as HIGH risk in the registry",
                     "score": 50.0,
-                    "evidence": {"provider_code": claim.provider_code},
+                    "evidence": {"provider_code": provider.sha_provider_code if provider else None},
                 }
             )
 
@@ -111,9 +111,9 @@ class ProviderProfiler:
         # Compare this claim's total_claim_amount against the provider's
         # rolling 90-day average to detect sudden amount spikes
         if claim.total_claim_amount:
-            ninety_days_ago = (
-                claim.visit_admission_date - timedelta(days=90)
-                if claim.visit_admission_date
+            start_date = (
+                claim.admission_date - timedelta(days=90)
+                if claim.admission_date
                 else datetime.utcnow() - timedelta(days=90)
             )
             result = await self.db.execute(
@@ -196,7 +196,7 @@ class ProviderProfiler:
                             ),
                             "score": 50.0,
                             "evidence": {
-                                "accommodation_type": claim.accommodation_type,
+                                "accommodation_type": accommodation_type,
                                 "count_last_30_days": high_value_count,
                             },
                         }

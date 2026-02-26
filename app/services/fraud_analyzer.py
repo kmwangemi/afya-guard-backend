@@ -43,8 +43,8 @@ class FraudAnalyzer:
         start_time = time.time()
 
         results: Dict[str, Any] = {
-            "claim_id": claim.id,
-            "claim_number": claim.claim_number,
+            "claim_id": str(claim.id),
+            "claim_number": claim.sha_claim_id,
             "modules": {},
             "composite_risk_score": 0.0,
             "final_status": None,
@@ -203,23 +203,42 @@ class FraudAnalyzer:
             existing.severity = severity
             existing.evidence = results
             existing.status = "open"
+            alert_obj = existing
         else:
-            self.db.add(
-                FraudAlert(
-                    claim_id=claim.id,
-                    alert_type="multiple_indicators",
-                    severity=severity,
-                    description=(
-                        f"Multiple fraud indicators detected. "
-                        f"Risk score: {results['composite_risk_score']:.1f}"
-                    ),
-                    evidence=results,
-                    detection_module="fraud_analyzer",
-                    module_confidence=results["composite_risk_score"] / 100.0,
-                    status="open",
-                    priority="critical" if severity == "critical" else "high",
-                )
+            alert_obj = FraudAlert(
+                claim_id=claim.id,
+                alert_type="multiple_indicators",
+                severity=severity,
+                description=(
+                    f"Multiple fraud indicators detected. "
+                    f"Risk score: {results['composite_risk_score']:.1f}"
+                ),
+                evidence=results,
+                detection_module="fraud_analyzer",
+                module_confidence=results["composite_risk_score"] / 100.0,
+                status="open",
+                priority="critical" if severity == "critical" else "high",
             )
+            self.db.add(alert_obj)
+            
+        await self.db.flush()  # Ensure alert_obj.id is populated
+
+        # -- Auto-Case Generation (Investigation) --
+        from app.models.investigation_model import Investigation
+        from app.models.enums_model import CaseStatus, CasePriority
+        import uuid
+
+        inv_result = await self.db.execute(select(Investigation).filter(Investigation.alert_id == alert_obj.id))
+        existing_inv = inv_result.scalars().first()
+
+        if not existing_inv:
+            new_inv = Investigation(
+                alert_id=alert_obj.id,
+                investigation_number=f"INV-{uuid.uuid4().hex[:8].upper()}",
+                priority=CasePriority.URGENT if severity == "critical" else CasePriority.HIGH,
+                status=CaseStatus.OPEN,
+            )
+            self.db.add(new_inv)
 
         await self.db.commit()
 
@@ -248,15 +267,45 @@ async def analyze_claim_background(claim_id: int) -> None:
             analyzer = FraudAnalyzer(db)
             result_data = await analyzer.analyze_claim(claim)
 
-            claim.risk_score = result_data["composite_risk_score"]
-            claim.is_flagged = result_data["composite_risk_score"] >= 60
-            claim.status = result_data["final_status"]
-            claim.fraud_flags = [
-                flag
-                for module_result in result_data["modules"].values()
-                for flag in (module_result.get("flags") or [])
-            ]
-            claim.analysis_completed_at = result_data["analyzed_at"]
+            # Persist results in raw_payload for minimal schema compatibility
+            if not claim.raw_payload:
+                claim.raw_payload = {}
+            
+            # Sync back to Claim fields that DO exist
+            claim.sha_status = result_data["final_status"]
+            claim.processed_at = result_data["analyzed_at"]
+            
+            # Encapsulate remaining analysis data in raw_payload
+            claim.raw_payload["analysis_result"] = {
+                "risk_score": result_data["composite_risk_score"],
+                "is_flagged": result_data["composite_risk_score"] >= 60,
+                "fraud_flags": [
+                    flag
+                    for module_result in result_data["modules"].values()
+                    for flag in (module_result.get("flags") or [])
+                ],
+                "analysis_completed_at": result_data["analyzed_at"].isoformat() if result_data["analyzed_at"] else None
+            }
+
+            # Create granular FraudScore record
+            from app.models.fraud_score_model import FraudScore
+            from app.models.enums_model import RiskLevel
+            
+            risk_lvl = RiskLevel.LOW
+            if result_data["composite_risk_score"] >= 80: risk_lvl = RiskLevel.CRITICAL
+            elif result_data["composite_risk_score"] >= 60: risk_lvl = RiskLevel.HIGH
+            elif result_data["composite_risk_score"] >= 40: risk_lvl = RiskLevel.MEDIUM
+
+            db_score = FraudScore(
+                claim_id=claim.id,
+                rule_score=result_data["composite_risk_score"] / 100.0,
+                ml_probability=result_data.get("ml_score", 0.0) / 100.0,
+                final_score=result_data["composite_risk_score"] / 100.0,
+                risk_level=risk_lvl,
+                scored_at=datetime.utcnow()
+            )
+            db.add(db_score)
+            
             await db.commit()
 
             print(

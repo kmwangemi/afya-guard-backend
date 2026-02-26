@@ -1,53 +1,60 @@
+from __future__ import annotations
+
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import Boolean, DateTime
-from sqlalchemy import Enum as SQLEnum
-from sqlalchemy import String
+from sqlalchemy import TIMESTAMP, Boolean, DateTime, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.models.enums_model import UserRole
+from app.models.association_tables_model import user_roles
 
 if TYPE_CHECKING:
-    from app.models.claim_model import Claim
-    from app.models.fraud_alert_model import FraudAlert
-    from app.models.investigation_model import Investigation
+    from app.models.audit_log_model import AuditLog
+    from app.models.refresh_token_model import RefreshToken
+    from app.models.role_model import Role
 
 
 class User(Base):
-    """SHA System Users (Investigators, Admins, Analysts)"""
+    """
+    System user — fraud analysts, admins, data scientists, auditors.
+    Supports RBAC via many-to-many Role relationship.
+    """
 
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
-        unique=True,
-        nullable=False,
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    # Identity
     email: Mapped[str] = mapped_column(
-        String(255), unique=True, index=True, nullable=False
+        String(255), unique=True, nullable=False, index=True
     )
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    phone: Mapped[Optional[str]] = mapped_column(String(20))
+    # Auth
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    first_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    last_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    phone_number: Mapped[str] = mapped_column(
-        String(20),
-        index=True,
-        nullable=False,
+    # Status
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    is_superuser: Mapped[bool] = mapped_column(
+        Boolean, default=False, comment="Superuser bypasses all permission checks"
     )
-    role: Mapped[UserRole] = mapped_column(
-        SQLEnum(UserRole), default=UserRole.INVESTIGATOR, index=True
-    )  # admin, investigator, analyst
-    profile_picture_url: Mapped[Optional[str]] = mapped_column(
-        String(500), nullable=True
+    # Last login tracking
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP)
+    failed_login_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        comment="Consecutive failed login attempts — lock account after threshold",
     )
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    is_on_duty: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(
+        TIMESTAMP,
+        comment="Account locked until this datetime after too many failed logins",
+    )
+    # Password policy
+    password_changed_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
@@ -58,20 +65,25 @@ class User(Base):
     )
 
     # Relationships
-    assigned_alerts: Mapped[List["FraudAlert"]] = relationship(
-        "FraudAlert", back_populates="assigned_to_user"
+    roles: Mapped[List["Role"]] = relationship(
+        "Role", secondary=user_roles, back_populates="users"
     )
-    investigations: Mapped[List["Investigation"]] = relationship(
-        "Investigation", back_populates="investigator"
+    refresh_tokens: Mapped[List["RefreshToken"]] = relationship(
+        "RefreshToken", back_populates="user", cascade="all, delete-orphan"
     )
-    approved_claims: Mapped[List["Claim"]] = relationship(
-        "Claim", back_populates="approved_by_user", foreign_keys="Claim.approved_by"
-    )
-    submitted_claims: Mapped[list["Claim"]] = relationship(
-        "Claim",
-        foreign_keys="[Claim.submitted_by]",
-        back_populates="submitted_by_user",
+    audit_logs: Mapped[List["AuditLog"]] = relationship(
+        "AuditLog", back_populates="user"
     )
 
+    def has_permission(self, permission_name: str) -> bool:
+        """Check if user holds a specific permission via any of their roles."""
+        if self.is_superuser:
+            return True
+        return any(
+            perm.name == permission_name
+            for role in self.roles
+            for perm in role.permissions
+        )
+
     def __repr__(self) -> str:
-        return f"<User(id={self.id}, email={self.email}, role={self.role})>"
+        return f"<User {self.email} active={self.is_active}>"

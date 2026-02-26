@@ -27,7 +27,10 @@ class DuplicateDetector:
         risk_score = 0.0
 
         # Guard: need at minimum the SHA number and admission date to query
-        if not claim.patient_sha_number or not claim.visit_admission_date:
+        patient_sha = claim.raw_payload.get("sha_number") if claim.raw_payload else None
+        admission_date = claim.admission_date
+
+        if not patient_sha or not admission_date:
             return {
                 "module": "duplicate",
                 "risk_score": 0.0,
@@ -42,8 +45,8 @@ class DuplicateDetector:
             select(Claim)
             .filter(
                 Claim.id != claim.id,
-                Claim.patient_sha_number == claim.patient_sha_number,
-                Claim.visit_admission_date == claim.visit_admission_date,
+                Claim.raw_payload["sha_number"].as_string() == patient_sha,
+                Claim.admission_date == admission_date,
                 Claim.total_claim_amount == claim.total_claim_amount,
             )
         )
@@ -73,13 +76,13 @@ class DuplicateDetector:
                 select(Claim)
                 .filter(
                     Claim.id != claim.id,
-                    Claim.patient_sha_number == claim.patient_sha_number,
+                    Claim.raw_payload["sha_number"].as_string() == patient_sha,
                     Claim.provider_id == claim.provider_id,
                     Claim.total_claim_amount == claim.total_claim_amount,
-                    Claim.visit_admission_date
-                    >= claim.visit_admission_date - timedelta(days=2),
-                    Claim.visit_admission_date
-                    <= claim.visit_admission_date + timedelta(days=2),
+                    Claim.admission_date
+                    >= admission_date - timedelta(days=2),
+                    Claim.admission_date
+                    <= admission_date + timedelta(days=2),
                 )
             )
             rolling_duplicates = result.scalars().all()
@@ -107,10 +110,10 @@ class DuplicateDetector:
             select(Claim)
             .filter(
                 Claim.id != claim.id,
-                Claim.patient_sha_number == claim.patient_sha_number,
+                Claim.raw_payload["sha_number"].as_string() == patient_sha,
                 Claim.provider_id != claim.provider_id,
-                func.date(Claim.visit_admission_date)
-                == func.date(claim.visit_admission_date),
+                func.date(Claim.admission_date)
+                == func.date(admission_date),
             )
         )
         same_day_other_providers = result.scalars().all()
@@ -138,20 +141,20 @@ class DuplicateDetector:
         # ── 4. Overlapping inpatient stays ────────────────────────────────
         # Two inpatient claims whose admission→discharge windows overlap
         if (
-            claim.visit_type
-            and claim.visit_type.lower() == "inpatient"
+            claim.claim_type
+            and claim.claim_type.lower() == "inpatient"
             and claim.discharge_date
         ):
             result = await self.db.execute(
                 select(Claim)
                 .filter(
                     Claim.id != claim.id,
-                    Claim.patient_sha_number == claim.patient_sha_number,
-                    Claim.visit_type.ilike("inpatient"),
+                    Claim.raw_payload["sha_number"].as_string() == patient_sha,
+                    Claim.claim_type.ilike("inpatient"),
                     Claim.discharge_date.isnot(None),
                     # Other claim starts before this one ends AND ends after this one starts
-                    Claim.visit_admission_date < claim.discharge_date,
-                    Claim.discharge_date > claim.visit_admission_date,
+                    Claim.admission_date < claim.discharge_date,
+                    Claim.discharge_date > admission_date,
                 )
             )
             overlapping = result.scalars().all()
@@ -175,11 +178,10 @@ class DuplicateDetector:
                     }
                 )
 
-        # ── 5. Same preauth number on multiple claims ─────────────────────
-        # A preauth number should authorise exactly one episode of care
+        benefit_lines = claim.raw_payload.get("benefit_lines") if claim.raw_payload else []
         preauth_numbers = {
             line.get("preauth_no")
-            for line in (claim.benefit_lines or [])
+            for line in (benefit_lines or [])
             if line.get("preauth_no")
         }
 
