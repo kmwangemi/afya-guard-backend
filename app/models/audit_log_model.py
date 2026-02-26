@@ -53,7 +53,7 @@ class AuditLog(Base):
         UUID(as_uuid=True), comment="PK of the affected record"
     )
     # Context
-    metadata: Mapped[Optional[dict]] = mapped_column(
+    audit_log_metadata: Mapped[Optional[dict]] = mapped_column(
         JSONB, comment="Arbitrary context — diff, old/new values, request IP, etc."
     )
     ip_address: Mapped[Optional[str]] = mapped_column(String(45))

@@ -1,60 +1,79 @@
+"""
+SHA Fraud Detection — Security Utilities
+Handles:
+  - Password hashing & verification (pwdlib)
+  - JWT access & refresh token creation
+  - Token decoding & validation
+"""
+
+import hashlib
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Optional
+from typing import Optional
 
 import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
 from pwdlib import PasswordHash
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
 
 from app.core.config import settings
-from app.core.database import get_db
-from app.models.user_model import User
-from app.schemas.user_schema import UserResponse
 
 password_hash = PasswordHash.recommended()
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/login")
-
-# Database dependency
-DbDependency = Annotated[AsyncSession, Depends(get_db)]
-TokenDependency = Annotated[str, Depends(oauth2_scheme)]
-
-# Token dependencies for each user type
-UserTokenDependency = Depends(oauth2_scheme)
+# ── Password Utils ────────────────────────────────────────────────────────────
 
 
-def hash_password(password: str) -> str:
-    """Hashes a password."""
-    return password_hash.hash(password)
+def hash_password(plain_password: str) -> str:
+    """Return a hashed plain-text password."""
+    return password_hash.hash(plain_password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verifies a password against a given hash."""
+    """Verify a plain-text password against its hash."""
     return password_hash.verify(plain_password, hashed_password)
 
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+# ── Token Utils ───────────────────────────────────────────────────────────────
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """
+    Create a signed JWT access token.
+    Payload should include at minimum: {"sub": str(user_id)}
+    """
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.now(UTC) + expires_delta
-    else:
-        expire = datetime.now(UTC) + timedelta(
-            minutes=settings.access_token_expire_minutes
-        )
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(
-        to_encode, settings.secret_key.get_secret_value(), algorithm=settings.algorithm
+    expire = datetime.now(UTC) + (
+        expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    return encoded_jwt
+    to_encode.update({"exp": expire, "type": "access"})
+    return jwt.encode(
+        to_encode, settings.SECRET_KEY.get_secret_value(), algorithm=settings.ALGORITHM
+    )
 
 
-def create_refresh_token(data: dict, expires_delta: timedelta):
+def create_refresh_token(data: dict) -> str:
+    """
+    Create a signed JWT refresh token (longer-lived).
+    Stored hashed in DB to allow server-side revocation.
+    """
     to_encode = data.copy()
-    expire = datetime.utcnow() + expires_delta
+    expire = datetime.now(UTC) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": expire, "type": "refresh"})
-    return jwt.encode(to_encode, settings.secret_key.get_secret_value(), algorithm=settings.algorithm)
+    return jwt.encode(
+        to_encode, settings.SECRET_KEY.get_secret_value(), algorithm=settings.ALGORITHM
+    )
+
+
+def decode_token(token: str) -> dict:
+    """
+    Decode and validate a JWT token.
+    Raises jwt.PyJWTError if invalid or expired.
+    """
+    return jwt.decode(
+        token, settings.SECRET_KEY.get_secret_value(), algorithms=[settings.ALGORITHM]
+    )
+
+
+def hash_token(raw_token: str) -> str:
+    """SHA-256 hash a raw refresh token for safe DB storage."""
+    return hashlib.sha256(raw_token.encode()).hexdigest()
 
 
 def verify_access_token(token: str) -> str | None:
@@ -70,39 +89,3 @@ def verify_access_token(token: str) -> str | None:
         return None
     else:
         return payload.get("sub")
-
-
-async def get_current_user(token: TokenDependency, db: DbDependency):
-    """Get the currently authenticated user based on the provided JWT token."""
-    import uuid
-
-    user_id = verify_access_token(token)
-    if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    # validate user_id is a valid UUID (defence against malformed jwts)
-    try:
-        user_uuid = uuid.UUID(user_id)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token format",
-            headers={"WWW-Authenticate": "Bearer"},
-        ) from exc
-    # Fetch user from database
-    result = await db.execute(select(User).filter(User.id == user_uuid))
-    user = result.scalars().first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return user
-
-
-# Convenience type annotations for dependency injection
-CurrentUser = Annotated[UserResponse, Depends(get_current_user)]

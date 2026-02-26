@@ -51,19 +51,17 @@ __all__ = [
     "RiskLevel",
     "RuleOperator",
     "TokenType",
-    # Association tables
-    "user_roles",
-    "role_permissions",
-    # Alert Enums
     "AlertType",
     "AlertStatus",
     "AlertSeverity",
     "AlertChannel",
     "DeliveryStatus",
+    # Association tables
+    "user_roles",
+    "role_permissions",
     # Models
     "FraudAlert",
     "AlertNotification",
-    # Models
     "Provider",
     "Member",
     "Claim",

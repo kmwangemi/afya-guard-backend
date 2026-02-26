@@ -1,93 +1,90 @@
+"""
+SHA Fraud Detection — User & RBAC Schemas
+
+Covers: user CRUD, role management, permission listing.
+"""
+
+import uuid
 from datetime import datetime
-from typing import Optional
-from uuid import UUID
+from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import EmailStr, Field
 
-from app.models.enums_model import UserRole
+from app.schemas.base_schema import BaseSchema, TimestampMixin, UUIDSchema
 
-
-# =========================
-# Base schema
-# =========================
-class UserBase(BaseModel):
-    first_name: str = Field(..., json_schema_extra={"example": "John"})
-    last_name: str = Field(..., json_schema_extra={"example": "Doe"})
-    email: EmailStr = Field(..., json_schema_extra={"example": "john.doe@gmail.com"})
-    phone_number: str = Field(..., json_schema_extra={"example": "+254712345678"})
-    role: UserRole = Field(..., json_schema_extra={"example": "user"})
-
-    @field_validator("first_name", "last_name", mode="before")
-    @classmethod
-    def normalize_names(cls, value: str) -> str:
-        return value.strip().title() if isinstance(value, str) else value
-
-    @field_validator("email", mode="before")
-    @classmethod
-    def normalize_email(cls, value: str) -> str:
-        return value.lower().strip() if isinstance(value, str) else value
+# ── Permission ────────────────────────────────────────────────────────────────
 
 
-# =========================
-# Create schema
-# =========================
-class UserCreate(UserBase):
-    """
-    Schema used when creating a user account.
-    """
-
-    password: str = Field(..., json_schema_extra={"example": "Test@123"})
-
-    @field_validator("password")
-    @classmethod
-    def validate_password(cls, value: str) -> str:
-        if len(value) < 6:
-            raise ValueError("Password must be at least 6 characters long")
-        if not any(char.isupper() for char in value):
-            raise ValueError("Password must contain at least one uppercase letter")
-        if not any(char in "!@#$%^&*()-_=+[]{}|;:'\",.<>?/`~" for char in value):
-            raise ValueError("Password must contain at least one special character")
-        return value
+class PermissionResponse(UUIDSchema):
+    name: str
+    description: Optional[str] = None
+    category: Optional[str] = None
 
 
-# =========================
-# Update schema
-# =========================
-class UserUpdate(BaseModel):
-    """
-    Schema used for updating user profile details.
-    """
-
-    first_name: Optional[str] = Field(None, json_schema_extra={"example": "Jane"})
-    last_name: Optional[str] = Field(None, json_schema_extra={"example": "Doe"})
-    phone_number: Optional[str] = Field(
-        None, json_schema_extra={"example": "+254798765432"}
-    )
-    profile_picture_url: Optional[str] = Field(
-        None,
-        json_schema_extra={"example": "https://cdn.example.com/profiles/user1.png"},
-    )
-    role: Optional[UserRole] = Field(None, json_schema_extra={"example": "admin"})
-
-    @field_validator("first_name", "last_name", mode="before")
-    @classmethod
-    def normalize_names(cls, value: str) -> str:
-        return value.strip().title() if isinstance(value, str) else value
+# ── Role ──────────────────────────────────────────────────────────────────────
 
 
-# =========================
-# Response schema
-# =========================
-class UserResponse(UserBase):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    profile_picture_url: Optional[str] = None
-    created_at: datetime
-    updated_at: datetime
+class RoleCreate(BaseSchema):
+    name: str = Field(min_length=2, max_length=100)
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    permission_ids: List[uuid.UUID] = []
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user: UserResponse
+class RoleResponse(UUIDSchema, TimestampMixin):
+    name: str
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    is_system_role: bool
+    permissions: List[PermissionResponse] = []
+
+
+# ── User ──────────────────────────────────────────────────────────────────────
+
+
+class UserCreate(BaseSchema):
+    """Admin creates a new system user."""
+
+    email: EmailStr
+    full_name: str = Field(min_length=2, max_length=255)
+    phone: Optional[str] = None
+    password: str = Field(min_length=8)
+    role_ids: List[uuid.UUID] = []
+    is_superuser: bool = False
+
+
+class UserUpdate(BaseSchema):
+    """Partial update — all fields optional."""
+
+    full_name: Optional[str] = Field(None, min_length=2, max_length=255)
+    phone: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class AssignRolesRequest(BaseSchema):
+    """Replace a user's roles entirely."""
+
+    role_ids: List[uuid.UUID]
+
+
+class UserResponse(UUIDSchema, TimestampMixin):
+    email: str
+    full_name: str
+    phone: Optional[str] = None
+    is_active: bool
+    is_superuser: bool
+    last_login_at: Optional[datetime] = None
+    must_change_password: bool
+    roles: List[RoleResponse] = []
+
+
+class UserListResponse(BaseSchema):
+    """Slim version for list endpoints (no nested permissions)."""
+
+    id: uuid.UUID
+    email: str
+    full_name: str
+    is_active: bool
+    is_superuser: bool
+    last_login_at: Optional[datetime] = None
+    roles: List[str] = []  # just role names for performance

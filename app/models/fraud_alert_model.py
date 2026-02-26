@@ -165,7 +165,7 @@ class FraudAlert(Base):
         comment="Set True if analyst marks this as a false positive (used for model feedback)",
     )
     # ── Extra context (flexible) ────────────────────────────────────────────
-    metadata: Mapped[Optional[dict]] = mapped_column(
+    fraud_alert_metadata: Mapped[Optional[dict]] = mapped_column(
         JSONB,
         comment=(
             "Arbitrary context payload from the triggering detector, e.g. "
