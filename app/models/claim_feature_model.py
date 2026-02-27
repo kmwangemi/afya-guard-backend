@@ -77,6 +77,8 @@ class ClaimFeature(Base):
     engineered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
+    submitted_hour: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    eligibility_checked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     # Relationship
     claim: Mapped["Claim"] = relationship("Claim", back_populates="features")

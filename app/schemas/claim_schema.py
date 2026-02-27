@@ -176,6 +176,14 @@ class ClaimResponse(UUIDSchema, TimestampMixin):
     member: Optional[MemberSlim] = None
     services: List[ClaimServiceResponse] = []
 
+    # ADD THIS VALIDATOR — handles the datetime → date coercion
+    @field_validator("admission_date", "discharge_date", mode="before")
+    @classmethod
+    def coerce_datetime_to_date(cls, v):
+        if isinstance(v, datetime):
+            return v.date()
+        return v
+
 
 class ClaimDetailResponse(ClaimResponse):
     """Full claim with features and latest fraud score."""

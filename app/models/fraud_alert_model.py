@@ -23,7 +23,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, List, Optional
 
 from sqlalchemy import (
-    TIMESTAMP,
     Boolean,
     DateTime,
     Enum,
@@ -145,10 +144,11 @@ class FraudAlert(Base):
         comment="Hours after raised_at before auto-escalation triggers (e.g. 24)",
     )
     escalated_at: Mapped[Optional[datetime]] = mapped_column(
-        TIMESTAMP, comment="Timestamp when this alert was escalated to a FraudCase"
+        DateTime(timezone=True),
+        comment="Timestamp when this alert was escalated to a FraudCase",
     )
     expires_at: Mapped[Optional[datetime]] = mapped_column(
-        TIMESTAMP,
+        DateTime(timezone=True),
         comment="Alert auto-expires (status → EXPIRED) after this time if unactioned",
     )
     # ── Resolution metadata ─────────────────────────────────────────────────

@@ -5,6 +5,8 @@ Assembles all routes under /api/v1 prefix.
 Run with: uvicorn app.main:app --reload
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -15,6 +17,18 @@ from app.api.v1.routes.fraud_case_routes import router as fraud_case_router
 from app.api.v1.routes.user_routes import router as user_router
 from app.core.config import settings
 
+# Call load_ml_artifacts() once at startup in your lifespan hook
+from app.services.fraud_service import load_ml_artifacts
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load ML model into memory once — shared across all requests
+    load_ml_artifacts()
+    yield
+    # (shutdown logic here if needed)
+
+
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
@@ -24,6 +38,7 @@ app = FastAPI(
     ),
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
