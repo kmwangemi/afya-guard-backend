@@ -12,7 +12,9 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.claim_model import Claim, ClaimFeature, ClaimService
+from app.models.claim_feature_model import ClaimFeature
+from app.models.claim_model import Claim
+from app.models.claim_service_model import ClaimService
 from app.models.enums_model import AuditAction
 from app.services.audit_service import AuditService
 

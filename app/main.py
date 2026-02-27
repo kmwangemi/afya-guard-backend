@@ -1,54 +1,60 @@
+"""
+SHA Fraud Detection Platform — Main Application
+
+Assembles all routes under /api/v1 prefix.
+Run with: uvicorn app.main:app --reload
+"""
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1.routers.auth_router import auth_router
-from app.api.v1.routers.claim_router import router as claim_router
-from app.api.v1.routers.simulation_router import router as simulation_router
-
+from app.api.v1.routes.admin_routes import router as admin_router
+from app.api.v1.routes.auth_routes import router as auth_router
+from app.api.v1.routes.claim_routes import router as claim_router
+from app.api.v1.routes.fraud_case_routes import router as fraud_case_router
+from app.api.v1.routes.user_routes import router as user_router
+from app.core.config import settings
 
 app = FastAPI(
-    title="Afya Guard API",
-    version="0.1.0",
-    description="API for Afya Guide application",
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    description=(
+        "Production-grade fraud intelligence platform for the Social Health Authority (SHA) Kenya. "
+        "Hybrid rule + ML scoring engine with full explainability, case management, and audit trails."
+    ),
     docs_url="/docs",
     redoc_url="/redoc",
 )
 
-# CORS Configuration
-origins = [
-    "http://localhost:3000",
-    "https://afya-guard-frontend.vercel.app",
-]  # Add frontend domains here
-
+# ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ── Routers ───────────────────────────────────────────────────────────────────
+PREFIX = "/api/v1"
 
-@app.get("/health")
-async def health_check():
+app.include_router(auth_router, prefix=PREFIX)
+app.include_router(user_router, prefix=PREFIX)
+app.include_router(claim_router, prefix=PREFIX)
+app.include_router(fraud_case_router, prefix=PREFIX)
+app.include_router(admin_router, prefix=PREFIX)
+
+
+@app.get("/", tags=["Health"])
+def root():
+    return {
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "status": "running",
+        "docs": "/docs",
+    }
+
+
+@app.get("/health", tags=["Health"])
+def health():
     return {"status": "ok"}
-
-
-# API Prefixes
-BASE_URL_PREFIX = "/api/v1"
-# Include API Routes
-app.include_router(
-    claim_router,
-    prefix=f"{BASE_URL_PREFIX}/claims",
-    tags=["Claims"],
-)
-app.include_router(
-    auth_router,
-    prefix=f"{BASE_URL_PREFIX}",
-    tags=["Users - Authentication"],
-)
-app.include_router(
-    simulation_router,
-    prefix=f"{BASE_URL_PREFIX}/simulation",
-    tags=["Simulation"],
-)

@@ -14,7 +14,8 @@ from typing import Dict, List, Optional
 from sqlalchemy import select
 
 from app.detectors.base_detector import BaseDetector, DetectorResult
-from app.models.claim_model import Claim, ClaimFeature
+from app.models.claim_feature_model import ClaimFeature
+from app.models.claim_model import Claim
 
 
 class DuplicateDetector(BaseDetector):
