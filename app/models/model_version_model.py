@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Optional
 
-from sqlalchemy import TIMESTAMP, Boolean, Date, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -59,11 +59,13 @@ class ModelVersion(Base):
         default=False,
         comment="True = this version is actively used for scoring",
     )
-    deployed_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP)
+    deployed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     deployed_by: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
 
     def __repr__(self) -> str:
         return f"<ModelVersion {self.version_name} deployed={self.is_deployed}>"

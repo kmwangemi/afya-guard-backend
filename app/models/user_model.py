@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import TIMESTAMP, Boolean, DateTime, Integer, String
+from sqlalchemy import Boolean, DateTime, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -42,18 +42,20 @@ class User(Base):
         Boolean, default=False, comment="Superuser bypasses all permission checks"
     )
     # Last login tracking
-    last_login_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     failed_login_count: Mapped[int] = mapped_column(
         Integer,
         default=0,
         comment="Consecutive failed login attempts — lock account after threshold",
     )
     locked_until: Mapped[Optional[datetime]] = mapped_column(
-        TIMESTAMP,
+        DateTime(timezone=True),
         comment="Account locked until this datetime after too many failed logins",
     )
     # Password policy
-    password_changed_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP)
+    password_changed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True)
+    )
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)

@@ -12,6 +12,7 @@ import jwt
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.security import (
@@ -49,7 +50,12 @@ class AuthService:
         Returns JWT access + refresh tokens on success.
         Increments failed_login_count on failure and locks account after 5 attempts.
         """
-        result = await db.execute(select(User).filter(User.email == email.lower()))
+        # ✅ Eagerly load roles to avoid MissingGreenlet on user.roles access
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.roles))
+            .filter(User.email == email.lower())
+        )
         user = result.scalars().first()
         # ── Account lockout check ──────────────────────────────────────────
         if user and user.locked_until and user.locked_until > datetime.now(UTC):
@@ -112,19 +118,21 @@ class AuthService:
                 id=user.id,
                 email=user.email,
                 full_name=user.full_name,
-                roles=[r.name for r in user.roles],
+                roles=[r.name for r in user.roles],  # ✅ safe — eagerly loaded
                 is_superuser=user.is_superuser,
                 must_change_password=user.must_change_password,
             ),
         )
 
     @staticmethod
-    async def refresh(db: AsyncSession, raw_refresh_token: str) -> AccessTokenResponse:
+    async def refresh(
+        db: AsyncSession,
+        raw_refresh_token: str,
+    ) -> AccessTokenResponse:
         """
         Exchange a valid refresh token for a new access token.
         The refresh token must exist in DB and not be revoked or expired.
         """
-
         try:
             payload = decode_token(raw_refresh_token)
             if payload.get("type") != "refresh":

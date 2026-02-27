@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{local_url}}/login
+  url: {{local_url}}/auth/login
   body: multipartForm
   auth: none
 }
@@ -18,8 +18,8 @@ body:json {
 }
 
 body:multipart-form {
-  username: mwas@gmail.com
-  password: Admin@123
+  username: admin@afyaguard.go.ke
+  password: AfyaGuard@2026!
 }
 
 tests {
