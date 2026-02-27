@@ -3,6 +3,11 @@ SHA Fraud Detection — Feature Engineering Service
 
 Transforms raw claim data into ML-ready features stored in claim_features table.
 Called automatically after claim ingestion and can be re-triggered manually.
+
+Changes from previous version:
+  [1] Added submitted_hour computation (hour of day 0–23)
+  [2] Added eligibility_checked computation (from raw_payload)
+  Both are required by fraud_service._features_to_dataframe() for ML scoring.
 """
 
 import uuid
@@ -31,7 +36,6 @@ class FeatureService:
         Compute all engineered features for a claim and persist to claim_features.
         If features already exist for this claim they are updated (re-computation).
         """
-
         # ── 1. Length of stay ─────────────────────────────────────────────────
         length_of_stay = 0
         if claim.admission_date and claim.discharge_date:
@@ -40,6 +44,17 @@ class FeatureService:
         weekend_submission = False
         if claim.submitted_at:
             weekend_submission = claim.submitted_at.weekday() >= 5  # Sat=5, Sun=6
+        # ── CHANGE 1: Submitted hour (0–23) ───────────────────────────────────
+        # Used by fraud_service to detect off-hours bulk submissions (11pm–5am).
+        submitted_hour = 12  # default to midday if no submitted_at
+        if claim.submitted_at:
+            submitted_hour = claim.submitted_at.hour
+        # ── CHANGE 2: Eligibility checked ─────────────────────────────────────
+        # Read from raw_payload — set to True during ingestion if SHA eligibility
+        # API was called before this visit. False = potential ghost patient signal.
+        eligibility_checked = bool(
+            (claim.raw_payload or {}).get("eligibility_checked", False)
+        )
         # ── 3. Member visit frequency ─────────────────────────────────────────
         now = claim.submitted_at or datetime.now(UTC)
         r30 = await db.execute(
@@ -58,7 +73,7 @@ class FeatureService:
             )
         )
         member_visits_7d = len(r7.scalars().all())
-        # Unique providers visited by member in 30 days (facility hopping)
+        # Unique providers visited by member in 30 days (facility hopping / card sharing)
         rp = await db.execute(
             select(Claim.provider_id).filter(
                 Claim.member_id == claim.member_id,
@@ -99,7 +114,7 @@ class FeatureService:
             prov_std = variance**0.5
             if prov_std > 0 and claim.total_claim_amount is not None:
                 provider_cost_zscore = (
-                    claim.total_claim_amount - provider_avg_cost_90d
+                    float(claim.total_claim_amount) - provider_avg_cost_90d
                 ) / prov_std
         # ── 6. Diagnosis cost z-score ─────────────────────────────────────────
         diagnosis_cost_zscore = None
@@ -121,14 +136,14 @@ class FeatureService:
                 diag_std = diag_var**0.5
                 if diag_std > 0:
                     diagnosis_cost_zscore = (
-                        claim.total_claim_amount - diag_avg
+                        float(claim.total_claim_amount) - diag_avg
                     ) / diag_std
-        # ── 7. Service count ───────────────────────────────────────────────────
+        # ── 7. Service count ──────────────────────────────────────────────────
         svc_result = await db.execute(
             select(ClaimService.id).filter(ClaimService.claim_id == claim.id)
         )
         service_count = len(svc_result.scalars().all())
-        # ── 8. Lab without diagnosis (phantom billing signal) ──────────────────
+        # ── 8. Lab without diagnosis (phantom billing signal) ─────────────────
         has_lab = False
         if claim.services:
             has_lab = any(
@@ -136,7 +151,7 @@ class FeatureService:
                 for s in claim.services
             )
         has_lab_without_diagnosis = has_lab and not claim.diagnosis_codes
-        # ── 9. Surgery without theatre notes (phantom billing signal) ──────────
+        # ── 9. Surgery without theatre notes (phantom billing signal) ─────────
         surgical_codes = {"SURG", "OT", "THEATRE", "ANES", "ANAES"}
         has_surgery = False
         if claim.services:
@@ -152,6 +167,7 @@ class FeatureService:
         existing_feature = existing.scalars().first()
         feature_data = dict(
             claim_id=claim.id,
+            # Original features
             provider_avg_cost_90d=provider_avg_cost_90d,
             provider_cost_zscore=provider_cost_zscore,
             member_visits_30d=member_visits_30d,
@@ -164,6 +180,9 @@ class FeatureService:
             service_count=service_count,
             has_lab_without_diagnosis=has_lab_without_diagnosis,
             has_surgery_without_theatre=has_surgery_without_theatre,
+            # CHANGE 1 & 2: New fields
+            submitted_hour=submitted_hour,
+            eligibility_checked=eligibility_checked,
             engineered_at=datetime.now(UTC),
         )
         if existing_feature:
@@ -181,6 +200,12 @@ class FeatureService:
             user_id=triggered_by,
             entity_type="ClaimFeature",
             entity_id=features.id,
-            metadata={"claim_id": str(claim.id)},
+            metadata={
+                "claim_id": str(claim.id),
+                "submitted_hour": submitted_hour,
+                "eligibility_checked": eligibility_checked,
+                "service_count": service_count,
+                "length_of_stay": length_of_stay,
+            },
         )
         return features

@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import List
 
 from pydantic import SecretStr, field_validator
@@ -40,7 +41,7 @@ class Settings(BaseSettings):
     ML_SCORE_WEIGHT: float = 0.4
     DETECTOR_SCORE_WEIGHT: float = 0.2
     # ── ML Model ──────────────────────────────────────────────────────────────
-    ML_MODEL_PATH: str = "ml_model.json"
+    ML_MODEL_PATH: str = "ml_models"
     ML_MODEL_FALLBACK_ENABLED: bool = True
     # ── Alert Settings ────────────────────────────────────────────────────────
     ALERT_AUTO_ESCALATE_HOURS: int = 24
@@ -57,6 +58,17 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",")]
         return v
+
+    # ── ADDED: Path property wrapping ML_MODEL_PATH ───────────────────────────
+    @property
+    def MODEL_DIR(self) -> Path:
+        """
+        Returns ML_MODEL_PATH as a Path object.
+        Used by fraud_service.load_ml_artifacts() to locate:
+          - ml_models/fraud_xgboost.joblib
+          - ml_models/feature_list.joblib
+        """
+        return Path(self.ML_MODEL_PATH)
 
 
 settings = Settings()

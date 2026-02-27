@@ -10,23 +10,27 @@ Idempotent seed script: safe to run multiple times.
   - Existing data is never deleted.
 
 Run:
-    python -m app.db.seeds.run            (from project root)
-    uv run python -m app.db.seeds.run     (if using uv)
+    python -m app.seeds.run            (from project root)
+    uv run python -m app.seeds.run     (if using uv)
 """
 
+import asyncio
 import os
 import sys
 
-# Allow running directly from project root
 sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 )
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.core.database import AsyncSessionLocal
 from app.core.security import hash_password
-from app.db.session import SessionLocal
-from app.models.models import Permission, Role, User
+from app.models.permission_model import Permission
+from app.models.role_model import Role
+from app.models.user_model import User
 from app.seeds.seed_data import (
     DEFAULT_SUPERUSER,
     PERMISSIONS,
@@ -34,7 +38,7 @@ from app.seeds.seed_data import (
     ROLES,
 )
 
-# ── Colour helpers (terminal output) ─────────────────────────────────────────
+# ── Colour helpers ────────────────────────────────────────────────────────────
 
 
 def green(s):
@@ -56,7 +60,7 @@ def bold(s):
 # ── Step functions ────────────────────────────────────────────────────────────
 
 
-def seed_permissions(db: Session) -> dict[str, Permission]:
+async def seed_permissions(db: AsyncSession) -> dict[str, Permission]:
     """
     Upsert all permissions from PERMISSIONS into the database.
     Returns a name → Permission ORM object mapping for role wiring.
@@ -64,10 +68,9 @@ def seed_permissions(db: Session) -> dict[str, Permission]:
     print(f"\n{bold('[ 1/3 ] Permissions')}")
     perm_map: dict[str, Permission] = {}
     created = updated = 0
-
     for name, (category, description) in PERMISSIONS.items():
-        existing = db.query(Permission).filter(Permission.name == name).first()
-
+        result = await db.execute(select(Permission).filter(Permission.name == name))
+        existing = result.scalars().first()
         if existing:
             changed = False
             if existing.description != description:
@@ -85,12 +88,11 @@ def seed_permissions(db: Session) -> dict[str, Permission]:
         else:
             perm = Permission(name=name, description=description, category=category)
             db.add(perm)
-            db.flush()
+            await db.flush()
             perm_map[name] = perm
             print(f"  {green('+')} {name:<35} (created)")
             created += 1
-
-    db.commit()
+    await db.commit()
     print(
         f"  → {green(f'{created} created')}, {yellow(f'{updated} updated')}, "
         f"{len(PERMISSIONS) - created - updated} unchanged"
@@ -98,16 +100,18 @@ def seed_permissions(db: Session) -> dict[str, Permission]:
     return perm_map
 
 
-def seed_roles(db: Session, perm_map: dict[str, Permission]) -> None:
-    """
-    Upsert all roles and wire them to their permissions.
-    """
+async def seed_roles(db: AsyncSession, perm_map: dict[str, Permission]) -> None:
+    """Upsert all roles and wire them to their permissions."""
     print(f"\n{bold('[ 2/3 ] Roles & permission assignments')}")
     roles_created = links_added = 0
-
     for role_name, (display_name, description, is_system) in ROLES.items():
-        role = db.query(Role).filter(Role.name == role_name).first()
-
+        # ✅ Eagerly load permissions to avoid MissingGreenlet
+        result = await db.execute(
+            select(Role)
+            .options(selectinload(Role.permissions))
+            .filter(Role.name == role_name)
+        )
+        role = result.scalars().first()
         if not role:
             role = Role(
                 name=role_name,
@@ -116,16 +120,21 @@ def seed_roles(db: Session, perm_map: dict[str, Permission]) -> None:
                 is_system_role=is_system,
             )
             db.add(role)
-            db.flush()
+            await db.flush()
+            # ✅ Re-fetch with selectinload after flush for new roles
+            result = await db.execute(
+                select(Role)
+                .options(selectinload(Role.permissions))
+                .filter(Role.name == role_name)
+            )
+            role = result.scalars().first()
             print(f"  {green('+')} {role_name}")
             roles_created += 1
         else:
             print(f"  {cyan('·')} {role_name} (exists)")
-
-        # Reconcile permissions — add any new ones, never remove
+        # Safe to access role.permissions — eagerly loaded in both branches
         expected_perm_names: list[str] = ROLE_PERMISSION_MAP.get(role_name, [])
         current_perm_names: set[str] = {p.name for p in role.permissions}
-
         for perm_name in expected_perm_names:
             if perm_name not in perm_map:
                 print(f"    {yellow('!')} Unknown permission '{perm_name}' — skipped")
@@ -136,45 +145,44 @@ def seed_roles(db: Session, perm_map: dict[str, Permission]) -> None:
                 links_added += 1
             else:
                 print(f"    {cyan('·')} linked · {perm_name}")
-
-    db.commit()
+    await db.commit()
     print(
         f"  → {green(f'{roles_created} roles created')}, "
         f"{green(f'{links_added} permission links added')}"
     )
 
 
-def seed_superuser(db: Session) -> None:
+async def seed_superuser(db: AsyncSession) -> None:
     """
     Create the default superuser if none exists, and ensure they always
     have the 'admin' role assigned.
-
-    Why assign a role to a superuser?
-      is_superuser=True bypasses all permission checks — so the admin can
-      always act on everything. But without a role, the UI shows an empty
-      roles list, which looks broken and confuses operators. Assigning the
-      'admin' role makes the account self-documenting and consistent.
     """
     print(f"\n{bold('[ 3/3 ] Default superuser')}")
-
-    admin_role = db.query(Role).filter(Role.name == "admin").first()
+    # ✅ Eagerly load permissions on admin_role
+    role_result = await db.execute(
+        select(Role)
+        .options(selectinload(Role.permissions))
+        .filter(Role.name == "admin")
+    )
+    admin_role = role_result.scalars().first()
     if not admin_role:
         print(f"  {yellow('!')} 'admin' role not found — run seeder after migrations")
         return
-
-    existing_super = db.query(User).filter(User.is_superuser == True).first()
-
+    # ✅ Eagerly load roles on existing superuser
+    user_result = await db.execute(
+        select(User).options(selectinload(User.roles)).filter(User.is_superuser == True)
+    )
+    existing_super = user_result.scalars().first()
     if existing_super:
-        # Backfill: assign admin role if missing (fixes accounts created before this fix)
-        current_role_names = {r.name for r in existing_super.roles}
+        # Backfill: assign admin role if missing
+        current_role_names = {r.name for r in existing_super.roles}  # ✅ safe
         if "admin" not in current_role_names:
             existing_super.roles.append(admin_role)
-            db.commit()
+            await db.commit()
             print(f"  {yellow('~')} {existing_super.email} — backfilled 'admin' role")
         else:
             print(f"  {cyan('·')} {existing_super.email} — already has 'admin' role")
         return
-
     user = User(
         email=DEFAULT_SUPERUSER["email"],
         full_name=DEFAULT_SUPERUSER["full_name"],
@@ -183,10 +191,9 @@ def seed_superuser(db: Session) -> None:
         is_active=True,
         must_change_password=True,
     )
-    user.roles = [admin_role]  # ← assign admin role on creation
+    user.roles = [admin_role]
     db.add(user)
-    db.commit()
-
+    await db.commit()
     print(f"  {green('+')} Created superuser  : {user.email}")
     print(
         f"  {green('+')} Role assigned       : admin ({len(admin_role.permissions)} permissions)"
@@ -198,25 +205,21 @@ def seed_superuser(db: Session) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
-def run_seed(db: Session) -> None:
+async def run_seed() -> None:
     print(bold("\n══════════════════════════════════════════"))
     print(bold("  Afya Guard — Database Seeder"))
     print(bold("══════════════════════════════════════════"))
-
-    perm_map = seed_permissions(db)
-    seed_roles(db, perm_map)
-    seed_superuser(db)
-
-    print(f"\n{green(bold('✓ Seeding complete.'))}\n")
+    async with AsyncSessionLocal() as db:
+        try:
+            perm_map = await seed_permissions(db)
+            await seed_roles(db, perm_map)
+            await seed_superuser(db)
+            print(f"\n{green(bold('✓ Seeding complete.'))}\n")
+        except Exception as e:
+            await db.rollback()
+            print(f"\n\033[91m✗ Seeding failed: {e}\033[0m\n")
+            raise
 
 
 if __name__ == "__main__":
-    db: Session = SessionLocal()
-    try:
-        run_seed(db)
-    except Exception as e:
-        db.rollback()
-        print(f"\n\033[91m✗ Seeding failed: {e}\033[0m\n")
-        raise
-    finally:
-        db.close()
+    asyncio.run(run_seed())

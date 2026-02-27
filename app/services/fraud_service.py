@@ -11,12 +11,29 @@ Orchestrates the full fraud scoring pipeline for a claim:
   7. FraudScore + FraudExplanation persistence
   8. Auto FraudCase creation for HIGH/CRITICAL scores
   9. Auto FraudAlert generation
+
+Changes from previous version:
+  [1] Module-level model cache — load_ml_artifacts() called once at app startup,
+      not on every request.
+  [2] _features_to_dataframe() updated to produce all 23 clean features:
+      - Group A (12): original ClaimFeature ORM fields
+      - Group B (11): engineered fields computed from Claim + Provider
+      - Removed: is_weekend (duplicate of weekend_submission)
+      - Removed: submitted_weekday (redundant — weekend_submission covers it)
+  [3] _run_ml_model() now uses module-level cached model instead of
+      loading from disk on every call.
+  [4] _resolve_field() updated to include the Group B engineered fields
+      so rules can target them too.
+  [5] _ml_fallback() extended to cover all Group A signals.
 """
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional
 
+import joblib
+import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +62,52 @@ from app.models.fraud_score_model import FraudScore
 from app.models.model_version_model import ModelVersion
 from app.services.audit_service import AuditService
 from app.services.feature_service import FeatureService
+
+logger = logging.getLogger(__name__)
+
+# ── CHANGE 1: Module-level model cache ───────────────────────────────────────
+# These are populated once by load_ml_artifacts() at app startup.
+# All FraudService instances share the same loaded model — no per-request I/O.
+
+_xgb_model: Optional[object] = None
+_feature_list: Optional[list] = None
+
+
+def load_ml_artifacts() -> None:
+    """
+    Load XGBoost model and feature list from disk into module-level cache.
+    Call this ONCE from your FastAPI lifespan startup hook:
+
+        from app.services.fraud_service import load_ml_artifacts
+        load_ml_artifacts()
+
+    Safe to call multiple times — skips reload if already loaded.
+    """
+    global _xgb_model, _feature_list
+
+    model_dir = settings.MODEL_DIR  # e.g. Path("ml_models")
+
+    model_path = model_dir / "fraud_xgboost.joblib"
+    feature_path = model_dir / "feature_list.joblib"
+
+    if not model_path.exists():
+        logger.warning(
+            f"ML model not found at {model_path} — will use fallback scoring"
+        )
+        return
+
+    if _xgb_model is not None:
+        logger.debug("ML model already loaded — skipping reload")
+        return
+
+    try:
+        _xgb_model = joblib.load(model_path)
+        _feature_list = joblib.load(feature_path)
+        logger.info(f"ML model loaded: {model_path} | features: {len(_feature_list)}")
+    except Exception as exc:
+        logger.error(f"Failed to load ML model: {exc}")
+        _xgb_model = None
+        _feature_list = None
 
 
 class FraudService:
@@ -188,12 +251,8 @@ class FraudService:
         features: ClaimFeature,
         claim: Claim,
     ) -> tuple[float, Dict[str, float]]:
-        """
-        Run all active fraud rules against computed features.
-        Returns (total_rule_score, explanation_dict).
-        """
         result = await self.db.execute(
-            select(FraudRule).filter(FraudRule.is_active == True)
+            select(FraudRule).filter(FraudRule.is_active == True)  # noqa: E712
         )
         active_rules = result.scalars().all()
         total_score: float = 0.0
@@ -211,19 +270,18 @@ class FraudService:
         features: ClaimFeature,
         claim: Claim,
     ) -> tuple[bool, float]:
-        """
-        Evaluate a single rule's JSONB config against claim features.
-        Config format: {"field": "...", "operator": "...", "value": ...}
-        """
         config = rule.config or {}
         field = config.get("field")
         operator = config.get("operator")
         threshold = config.get("value")
+
         if not field or not operator:
             return False, 0.0
+
         actual = self._resolve_field(field, features, claim)
         if actual is None:
             return False, 0.0
+
         fired = False
         try:
             if operator == "equals":
@@ -248,6 +306,7 @@ class FraudService:
                 fired = actual not in (threshold or [])
         except (TypeError, ValueError):
             return False, 0.0
+
         return fired, float(rule.weight) if fired else 0.0
 
     def _resolve_field(
@@ -256,7 +315,13 @@ class FraudService:
         features: ClaimFeature,
         claim: Claim,
     ):
-        """Resolve a field name to its value from features or claim object."""
+        """
+        Resolve a rule field name to its value.
+
+        CHANGE 4: Added all Group B engineered fields so DB-configured rules
+        can target them (e.g. a rule on is_off_hours, amount_per_service, etc.)
+        """
+        # Group A — read directly from ClaimFeature ORM
         feature_fields = {
             "provider_avg_cost_90d",
             "provider_cost_zscore",
@@ -270,17 +335,49 @@ class FraudService:
             "service_count",
             "has_lab_without_diagnosis",
             "has_surgery_without_theatre",
+            # Group B fields stored on ClaimFeature
+            "submitted_hour",
+            "eligibility_checked",
         }
+        # Group B — computed fields (resolved via claim + provider)
         claim_fields = {
             "total_claim_amount",
             "approved_amount",
             "claim_type",
             "sha_status",
         }
+
         if field in feature_fields and features:
             return getattr(features, field, None)
         elif field in claim_fields:
             return getattr(claim, field, None)
+
+        # Compute Group B engineered fields on the fly for rule evaluation
+        if claim:
+            amount = float(claim.total_claim_amount or 0)
+            los = float(features.length_of_stay or 0) if features else 0.0
+            svc_count = int(features.service_count or 1) if features else 1
+            provider = getattr(claim, "provider", None)
+            fac_level = int(getattr(provider, "facility_level", 4) or 4)
+            s_hour = (
+                int(getattr(features, "submitted_hour", 12) or 12) if features else 12
+            )
+
+            computed = {
+                "facility_level": fac_level,
+                "log_amount": float(np.log1p(amount)),
+                "amount_per_service": round(amount / max(svc_count, 1), 2),
+                "amount_per_day": round(amount / max(los, 1), 2),
+                "is_off_hours": int(s_hour >= 23 or s_hour <= 5),
+                "no_eligibility_check": int(
+                    not bool(getattr(features, "eligibility_checked", True))
+                ),
+                "high_service_count": int(svc_count > 8),
+                "level_amount_mismatch": int(fac_level <= 2 and amount > 10000),
+            }
+            if field in computed:
+                return computed[field]
+
         return None
 
     # ── ML Model ──────────────────────────────────────────────────────────────
@@ -289,84 +386,174 @@ class FraudService:
         self, features: ClaimFeature
     ) -> tuple[float, Dict[str, float], Optional[uuid.UUID]]:
         """
-        Run XGBoost model if available.
-        Falls back to rule-only scoring if model not loaded or not deployed.
-        Returns (ml_score_0_to_100, shap_explanations, model_version_id).
+        CHANGE 3: Uses module-level cached model (_xgb_model) instead of
+        loading from disk on every request. Falls back gracefully if model
+        is not loaded.
         """
+        if _xgb_model is None:
+            logger.debug("ML model not loaded — using fallback scoring")
+            return self._ml_fallback(features)
+
         try:
             import shap
-            import xgboost as xgb
 
+            # Get the deployed model version ID for audit trail
             result = await self.db.execute(
-                select(ModelVersion).filter(ModelVersion.is_deployed == True)
+                select(ModelVersion).filter(
+                    ModelVersion.is_deployed == True
+                )  # noqa: E712
             )
             model_ver = result.scalars().first()
-            if not model_ver or not model_ver.model_artifact_path:
-                return self._ml_fallback(features)
-            model = xgb.XGBClassifier()
-            model.load_model(model_ver.model_artifact_path)
+
             df = self._features_to_dataframe(features)
-            prob = float(model.predict_proba(df)[0][1]) * 100
-            explainer = shap.TreeExplainer(model)
+            prob = float(_xgb_model.predict_proba(df)[0][1]) * 100
+
+            # SHAP explanations — which features drove this score
+            explainer = shap.TreeExplainer(_xgb_model)
             shap_values = explainer.shap_values(df)
             shap_map = {
                 col: round(float(shap_values[0][i]), 6)
                 for i, col in enumerate(df.columns)
             }
-            return prob, shap_map, model_ver.id
-        except Exception:
+
+            return prob, shap_map, model_ver.id if model_ver else None
+
+        except Exception as exc:
+            logger.warning(f"ML scoring failed, using fallback: {exc}")
             return self._ml_fallback(features)
 
     def _ml_fallback(
         self, features: ClaimFeature
     ) -> tuple[float, Dict[str, float], None]:
-        """Simple heuristic scoring when no ML model is deployed."""
+        """
+        CHANGE 5: Extended to cover all Group A signals, not just 5.
+        Used when no model is deployed or scoring fails.
+        """
         score: float = 0.0
         explanations: Dict[str, float] = {}
+
+        # Provider signals
         if features.provider_cost_zscore and features.provider_cost_zscore > 2:
-            score += 30.0
-            explanations["provider_cost_zscore"] = features.provider_cost_zscore
-        if features.member_visits_30d and features.member_visits_30d > 4:
-            score += 20.0
-            explanations["member_visits_30d"] = float(features.member_visits_30d)
-        if features.diagnosis_cost_zscore and features.diagnosis_cost_zscore > 2:
             score += 25.0
-            explanations["diagnosis_cost_zscore"] = features.diagnosis_cost_zscore
+            explanations["provider_cost_zscore"] = float(features.provider_cost_zscore)
+
+        # Member signals
+        if features.member_visits_30d and features.member_visits_30d > 4:
+            score += 15.0
+            explanations["member_visits_30d"] = float(features.member_visits_30d)
+        if features.member_visits_7d and features.member_visits_7d > 2:
+            score += 10.0
+            explanations["member_visits_7d"] = float(features.member_visits_7d)
+        if (
+            features.member_unique_providers_30d
+            and features.member_unique_providers_30d > 3
+        ):
+            score += 15.0
+            explanations["member_unique_providers_30d"] = float(
+                features.member_unique_providers_30d
+            )
+
+        # Duplicate signal
+        if features.duplicate_within_7d:
+            score += 30.0
+            explanations["duplicate_within_7d"] = 1.0
+
+        # Diagnosis/cost signals
+        if features.diagnosis_cost_zscore and features.diagnosis_cost_zscore > 2:
+            score += 20.0
+            explanations["diagnosis_cost_zscore"] = float(
+                features.diagnosis_cost_zscore
+            )
+
+        # Clinical consistency signals
         if features.has_lab_without_diagnosis:
             score += 15.0
             explanations["has_lab_without_diagnosis"] = 1.0
         if features.has_surgery_without_theatre:
             score += 20.0
             explanations["has_surgery_without_theatre"] = 1.0
+
+        # Timing signals
+        s_hour = int(features.submitted_hour or 12)
+        if s_hour >= 23 or s_hour <= 5:
+            score += 10.0
+            explanations["is_off_hours"] = 1.0
+
         return min(score, 100.0), explanations, None
 
     def _features_to_dataframe(self, features: ClaimFeature):
-        """Convert ClaimFeature ORM object to pandas DataFrame for XGBoost."""
+        """
+        CHANGE 2: Updated to produce all 23 clean features.
+
+        Group A (12) — read from ClaimFeature ORM fields.
+        Group B (11) — computed from ClaimFeature + Claim + Provider.
+
+        Removed vs old version:
+          ❌ is_weekend       (was duplicate of weekend_submission)
+          ❌ submitted_weekday (was redundant — weekend_submission covers it)
+
+        Requires these relationships to be eagerly loaded on the Claim:
+          - claim.provider  (for facility_level and county)
+        Requires these fields on ClaimFeature (add via Alembic migration):
+          - submitted_hour     (int)
+          - eligibility_checked (bool)
+        """
         import pandas as pd
 
-        return pd.DataFrame(
-            [
-                {
-                    "provider_avg_cost_90d": features.provider_avg_cost_90d or 0,
-                    "provider_cost_zscore": features.provider_cost_zscore or 0,
-                    "member_visits_30d": features.member_visits_30d or 0,
-                    "member_visits_7d": features.member_visits_7d or 0,
-                    "member_unique_providers_30d": features.member_unique_providers_30d
-                    or 0,
-                    "duplicate_within_7d": int(features.duplicate_within_7d or False),
-                    "length_of_stay": features.length_of_stay or 0,
-                    "weekend_submission": int(features.weekend_submission or False),
-                    "diagnosis_cost_zscore": features.diagnosis_cost_zscore or 0,
-                    "service_count": features.service_count or 0,
-                    "has_lab_without_diagnosis": int(
-                        features.has_lab_without_diagnosis or False
-                    ),
-                    "has_surgery_without_theatre": int(
-                        features.has_surgery_without_theatre or False
-                    ),
-                }
-            ]
-        )
+        claim = features.claim
+        provider = getattr(claim, "provider", None) if claim else None
+        amount = float(claim.total_claim_amount or 0) if claim else 0.0
+        los = float(features.length_of_stay or 0)
+        svc_count = int(features.service_count or 1)
+        fac_level = int(getattr(provider, "facility_level", 4) or 4) if provider else 4
+
+        # INPATIENT=0, OUTPATIENT=1 — matches training encoding
+        claim_type_raw = (claim.claim_type or "OUTPATIENT") if claim else "OUTPATIENT"
+        claim_type_enc = 0 if str(claim_type_raw).upper() == "INPATIENT" else 1
+
+        # Hash-based county encoding — must match training (hash(county) % 10)
+        county = getattr(provider, "county", "Nairobi") or "Nairobi"
+        county_enc = hash(county) % 10
+
+        submitted_hour = int(features.submitted_hour or 12)
+
+        row = {
+            # ── Group A: ClaimFeature ORM fields (12) ─────────────────────────
+            "provider_avg_cost_90d": float(features.provider_avg_cost_90d or 0),
+            "provider_cost_zscore": float(features.provider_cost_zscore or 0),
+            "member_visits_30d": int(features.member_visits_30d or 0),
+            "member_visits_7d": int(features.member_visits_7d or 0),
+            "member_unique_providers_30d": int(
+                features.member_unique_providers_30d or 0
+            ),
+            "duplicate_within_7d": int(bool(features.duplicate_within_7d)),
+            "length_of_stay": los,
+            "weekend_submission": int(bool(features.weekend_submission)),
+            "diagnosis_cost_zscore": float(features.diagnosis_cost_zscore or 0),
+            "service_count": svc_count,
+            "has_lab_without_diagnosis": int(bool(features.has_lab_without_diagnosis)),
+            "has_surgery_without_theatre": int(
+                bool(features.has_surgery_without_theatre)
+            ),
+            # ── Group B: Engineered fields (11) ───────────────────────────────
+            "claim_type_enc": claim_type_enc,
+            "county_enc": county_enc,
+            "facility_level": fac_level,
+            "log_amount": float(np.log1p(amount)),
+            "amount_per_service": round(amount / max(svc_count, 1), 2),
+            "amount_per_day": round(amount / max(los, 1), 2),
+            "submitted_hour": submitted_hour,
+            "is_off_hours": int(submitted_hour >= 23 or submitted_hour <= 5),
+            "no_eligibility_check": int(
+                not bool(getattr(features, "eligibility_checked", True))
+            ),
+            "high_service_count": int(svc_count > 8),
+            "level_amount_mismatch": int(fac_level <= 2 and amount > 10000),
+        }
+
+        # Use saved feature order to guarantee column alignment with trained model
+        feature_list = _feature_list or list(row.keys())
+        return pd.DataFrame([row])[feature_list]
 
     # ── Risk level ────────────────────────────────────────────────────────────
 
@@ -418,7 +605,6 @@ class FraudService:
         risk_level: RiskLevel,
     ) -> None:
         alerts_to_add = []
-        # Score-based alert
         if risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             severity = (
                 AlertSeverity.CRITICAL
@@ -450,7 +636,6 @@ class FraudService:
                     + timedelta(hours=settings.ALERT_EXPIRE_HOURS),
                 )
             )
-        # Detector-specific alerts
         detector_alert_map = {
             "DuplicateDetector": AlertType.DUPLICATE_CLAIM,
             "PhantomPatientDetector": AlertType.PHANTOM_PATIENT,
