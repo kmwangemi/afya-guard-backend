@@ -27,7 +27,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     # ── CORS ──────────────────────────────────────────────────────────────────
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8000"]
+    ALLOWED_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "https://afya-guard-frontend.vercel.app",
+    ]
     # ── Fraud Scoring Thresholds ──────────────────────────────────────────────
     FRAUD_MEDIUM_THRESHOLD: float = 40.0
     FRAUD_HIGH_THRESHOLD: float = 70.0

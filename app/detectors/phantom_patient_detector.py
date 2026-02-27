@@ -11,7 +11,8 @@ from datetime import date
 from typing import Dict, Optional
 
 from app.detectors.base_detector import BaseDetector, DetectorResult
-from app.models.claim_model import Claim, ClaimFeature
+from app.models.claim_feature_model import ClaimFeature
+from app.models.claim_model import Claim
 from app.models.member_model import Member
 
 

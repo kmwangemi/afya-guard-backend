@@ -12,7 +12,8 @@ when only a general consultation (CONSULT01, KES 1,500) occurred.
 from typing import Dict, Optional, Set
 
 from app.detectors.base_detector import BaseDetector, DetectorResult
-from app.models.claim_model import Claim, ClaimFeature
+from app.models.claim_feature_model import ClaimFeature
+from app.models.claim_model import Claim
 
 # ── Reference price table (KES) ───────────────────────────────────────────────
 # Maps service code prefix → expected_max_unit_price

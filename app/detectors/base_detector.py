@@ -11,7 +11,8 @@ from typing import Any, Dict, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.claim_model import Claim, ClaimFeature
+from app.models.claim_feature_model import ClaimFeature
+from app.models.claim_model import Claim
 
 
 @dataclass
