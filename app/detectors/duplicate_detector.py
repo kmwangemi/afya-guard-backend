@@ -53,7 +53,7 @@ LOOKBACK_DAYS: int = 30
 AMOUNT_TOLERANCE_PCT: float = 0.05
 
 
-class DuplicateClaimsDetector(BaseDetector):
+class DuplicateDetector(BaseDetector):
     """
     Detects exact and near-duplicate claims using fingerprinting
     and weighted fuzzy similarity scoring.

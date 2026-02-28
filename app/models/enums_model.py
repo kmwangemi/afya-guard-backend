@@ -202,6 +202,7 @@ class AlertType(str, enum.Enum):
     PHANTOM_PATIENT = "PHANTOM_PATIENT"  # PhantomPatientDetector fired
     UPCODING_DETECTED = "UPCODING_DETECTED"  # UpcodingDetector fired
     PROVIDER_ANOMALY = "PROVIDER_ANOMALY"  # ProviderProfiler fired
+    GHOST_PROVIDER = "GHOST_PROVIDER"  # add this
     # Rule-based triggers
     RULE_THRESHOLD_BREACH = (
         "RULE_THRESHOLD_BREACH"  # Specific fraud rule exceeded weight

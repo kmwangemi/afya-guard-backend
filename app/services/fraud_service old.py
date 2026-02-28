@@ -4,7 +4,7 @@ SHA Fraud Detection — Fraud Service (Hybrid Scoring Orchestrator)
 Orchestrates the full fraud scoring pipeline for a claim:
   1. Feature engineering (via FeatureService)
   2. Rule engine (deterministic, DB-configurable rules)
-  3. Modular detectors (Duplicate, Phantom, Upcoding, Provider, GhostProvider)
+  3. Modular detectors (Duplicate, Phantom, Upcoding, Provider)
   4. ML model scoring (XGBoost, with graceful fallback)
   5. Score aggregation (weighted formula)
   6. Explainability (SHAP-style feature weights stored per score)
@@ -25,10 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.detectors.base_detector import DetectorResult
-
-# FIX 1: All detector imports grouped together
 from app.detectors.duplicate_detector import DuplicateDetector
-from app.detectors.ghost_provider_detector import GhostProviderDetector
 from app.detectors.phantom_patient_detector import PhantomPatientDetector
 from app.detectors.provider_profiler_detector import ProviderProfiler
 from app.detectors.upcoding_detector import UpcodingDetector
@@ -51,10 +48,14 @@ from app.models.fraud_score_model import FraudScore
 from app.models.model_version_model import ModelVersion
 from app.services.audit_service import AuditService
 from app.services.feature_service import FeatureService
+from app.detectors.ghost_provider_detector import GhostProviderDetector
 
 logger = logging.getLogger(__name__)
 
 # ── Module-level model cache ──────────────────────────────────────────────────
+# Populated once by load_ml_artifacts() at app startup.
+# All FraudService instances share the same loaded model — no per-request I/O.
+
 _xgb_model: Optional[object] = None
 _feature_list: Optional[list] = None
 
@@ -71,7 +72,8 @@ def load_ml_artifacts() -> None:
     """
     global _xgb_model, _feature_list
 
-    model_dir = settings.MODEL_DIR
+    model_dir = settings.MODEL_DIR  # Path("ml_models")
+
     model_path = model_dir / "fraud_xgboost.joblib"
     feature_path = model_dir / "feature_list.joblib"
 
@@ -91,18 +93,6 @@ def load_ml_artifacts() -> None:
         logger.error(f"Failed to load ML model: {exc}")
         _xgb_model = None
         _feature_list = None
-
-
-# FIX 2: Detector → AlertType map defined at module level, includes GhostProviderDetector.
-# Defined here (not inside _raise_alerts) so it's easy to extend without hunting
-# through method bodies. Add AlertType.GHOST_PROVIDER to your enum — see FIX 3.
-DETECTOR_ALERT_MAP: Dict[str, AlertType] = {
-    "DuplicateDetector": AlertType.DUPLICATE_CLAIM,
-    "PhantomPatientDetector": AlertType.PHANTOM_PATIENT,
-    "UpcodingDetector": AlertType.UPCODING_DETECTED,
-    "ProviderProfiler": AlertType.PROVIDER_ANOMALY,
-    "GhostProviderDetector": AlertType.GHOST_PROVIDER,  # FIX 2 — was missing
-}
 
 
 class FraudService:
@@ -125,6 +115,11 @@ class FraudService:
         scored_by: str = "system",
         triggered_by_user_id: Optional[uuid.UUID] = None,
     ) -> FraudScore:
+        """
+        Run the full fraud scoring pipeline for a single claim.
+        Returns the persisted FraudScore with explanations.
+        """
+
         # ── Step 1: Feature engineering ───────────────────────────────────────
         features = await FeatureService.compute_features(
             self.db, claim, triggered_by=triggered_by_user_id
@@ -214,7 +209,7 @@ class FraudService:
         # ── Step 9: Auto-create FraudCase if HIGH/CRITICAL ────────────────────
         if risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             await self._auto_create_case(claim, fraud_score, risk_level)
-        # ── Step 10: Auto-raise FraudAlerts ───────────────────────────────────
+        # ── Step 10: Auto-raise FraudAlerts for fired detectors ───────────────
         await self._raise_alerts(claim, fraud_score, detector_results, risk_level)
         await self.db.commit()
         await self.db.refresh(fraud_score)
@@ -246,7 +241,7 @@ class FraudService:
             select(FraudRule).filter(FraudRule.is_active == True)  # noqa: E712
         )
         active_rules = result.scalars().all()
-        total_score = 0.0
+        total_score: float = 0.0
         explanations: Dict[str, float] = {}
         for rule in active_rules:
             fired, contribution = self._evaluate_rule(rule, features, claim)
@@ -296,7 +291,13 @@ class FraudService:
             return False, 0.0
         return fired, float(rule.weight) if fired else 0.0
 
-    def _resolve_field(self, field: str, features: ClaimFeature, claim: Claim):
+    def _resolve_field(
+        self,
+        field: str,
+        features: ClaimFeature,
+        claim: Claim,
+    ):
+        """Resolve a rule field name to its value from features or claim."""
         feature_fields = {
             "provider_avg_cost_90d",
             "provider_cost_zscore",
@@ -321,8 +322,9 @@ class FraudService:
         }
         if field in feature_fields and features:
             return getattr(features, field, None)
-        if field in claim_fields:
+        elif field in claim_fields:
             return getattr(claim, field, None)
+        # Compute engineered fields on the fly for rule evaluation
         if claim:
             amount = float(claim.total_claim_amount or 0)
             los = float(features.length_of_stay or 0) if features else 0.0
@@ -353,6 +355,11 @@ class FraudService:
     async def _run_ml_model(
         self, features: ClaimFeature
     ) -> tuple[float, Dict[str, float], Optional[uuid.UUID]]:
+        """
+        Run XGBoost model if available.
+        Uses feature_importances_ instead of SHAP to avoid the
+        base_score string format bug in this XGBoost/SHAP version combo.
+        """
         if _xgb_model is None:
             logger.debug("ML model not loaded — using fallback scoring")
             return self._ml_fallback(features)
@@ -365,6 +372,9 @@ class FraudService:
             model_ver = result.scalars().first()
             df = self._features_to_dataframe(features)
             prob = float(_xgb_model.predict_proba(df)[0][1]) * 100
+            # Use built-in feature importances — no SHAP needed.
+            # Gives each feature's global importance weight, stored
+            # per score for the investigator dashboard.
             feature_list = _feature_list or list(df.columns)
             importances = _xgb_model.feature_importances_
             explanation_map = {
@@ -379,6 +389,7 @@ class FraudService:
     def _ml_fallback(
         self, features: ClaimFeature
     ) -> tuple[float, Dict[str, float], None]:
+        """Heuristic scoring used when no ML model is deployed or scoring fails."""
         score: float = 0.0
         explanations: Dict[str, float] = {}
         if features.provider_cost_zscore and features.provider_cost_zscore > 2:
@@ -419,6 +430,7 @@ class FraudService:
         return min(score, 100.0), explanations, None
 
     def _features_to_dataframe(self, features: ClaimFeature):
+        """Convert ClaimFeature ORM object to pandas DataFrame for XGBoost."""
         import pandas as pd
 
         claim = features.claim
@@ -433,6 +445,7 @@ class FraudService:
         county_enc = hash(county) % 10
         submitted_hour = int(features.submitted_hour or 12)
         row = {
+            # Group A — ClaimFeature ORM fields (12)
             "provider_avg_cost_90d": float(features.provider_avg_cost_90d or 0),
             "provider_cost_zscore": float(features.provider_cost_zscore or 0),
             "member_visits_30d": int(features.member_visits_30d or 0),
@@ -449,6 +462,7 @@ class FraudService:
             "has_surgery_without_theatre": int(
                 bool(features.has_surgery_without_theatre)
             ),
+            # Group B — Engineered fields (11)
             "claim_type_enc": claim_type_enc,
             "county_enc": county_enc,
             "facility_level": fac_level,
@@ -516,8 +530,6 @@ class FraudService:
         risk_level: RiskLevel,
     ) -> None:
         alerts_to_add = []
-
-        # High/Critical score alert
         if risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             severity = (
                 AlertSeverity.CRITICAL
@@ -549,44 +561,37 @@ class FraudService:
                     + timedelta(hours=settings.ALERT_EXPIRE_HOURS),
                 )
             )
-
-        # FIX 2: Use module-level DETECTOR_ALERT_MAP — includes GhostProviderDetector.
-        # Old code had a local dict inside this method that was missing the entry,
-        # causing ghost provider alerts to be silently dropped.
+        detector_alert_map = {
+            "DuplicateDetector": AlertType.DUPLICATE_CLAIM,
+            "PhantomPatientDetector": AlertType.PHANTOM_PATIENT,
+            "UpcodingDetector": AlertType.UPCODING_DETECTED,
+            "ProviderProfiler": AlertType.PROVIDER_ANOMALY,
+        }
         for result in detector_results:
-            if not result.fired or result.score < 50:
-                continue
-            alert_type = DETECTOR_ALERT_MAP.get(result.detector_name)
-            if not alert_type:
-                # FIX 3: Warn loudly instead of silently skipping unknown detectors.
-                # If you add a new detector and forget to add it to DETECTOR_ALERT_MAP,
-                # you'll see this in logs rather than wondering why no alerts appear.
-                logger.warning(
-                    f"No AlertType mapping for detector '{result.detector_name}' — "
-                    f"alert not raised. Add it to DETECTOR_ALERT_MAP at module level."
+            if result.fired and result.score >= 50:
+                alert_type = detector_alert_map.get(result.detector_name)
+                if not alert_type:
+                    continue
+                alerts_to_add.append(
+                    FraudAlert(
+                        claim_id=claim.id,
+                        fraud_score_id=fraud_score.id,
+                        alert_type=alert_type,
+                        severity=(
+                            AlertSeverity.WARNING
+                            if result.score < 75
+                            else AlertSeverity.HIGH
+                        ),
+                        status=AlertStatus.OPEN,
+                        title=f"{result.detector_name} Alert — {claim.sha_claim_id}",
+                        message=result.explanation,
+                        triggered_by=result.detector_name,
+                        score_at_alert=fraud_score.final_score,
+                        auto_escalate=False,
+                        expires_at=datetime.now(UTC)
+                        + timedelta(hours=settings.ALERT_EXPIRE_HOURS),
+                        metadata=result.metadata,
+                    )
                 )
-                continue
-            alerts_to_add.append(
-                FraudAlert(
-                    claim_id=claim.id,
-                    fraud_score_id=fraud_score.id,
-                    alert_type=alert_type,
-                    severity=(
-                        AlertSeverity.WARNING
-                        if result.score < 75
-                        else AlertSeverity.HIGH
-                    ),
-                    status=AlertStatus.OPEN,
-                    title=f"{result.detector_name} Alert — {claim.sha_claim_id}",
-                    message=result.explanation,
-                    triggered_by=result.detector_name,
-                    score_at_alert=fraud_score.final_score,
-                    auto_escalate=False,
-                    expires_at=datetime.now(UTC)
-                    + timedelta(hours=settings.ALERT_EXPIRE_HOURS),
-                    metadata=result.metadata,
-                )
-            )
-
         if alerts_to_add:
             self.db.add_all(alerts_to_add)
