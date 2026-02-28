@@ -17,14 +17,16 @@ from app.api.v1.routes.fraud_case_routes import router as fraud_case_router
 from app.api.v1.routes.user_routes import router as user_router
 from app.core.config import settings
 
-# Call load_ml_artifacts() once at startup in your lifespan hook
+# Call load_ml_artifacts() & load_upcoding_artifacts  once at startup in your lifespan hook
 from app.services.fraud_service import load_ml_artifacts
+from app.detectors.upcoding_detector import load_upcoding_artifacts
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load ML model into memory once — shared across all requests
-    load_ml_artifacts()
+    load_ml_artifacts()  # XGBoost fraud model
+    load_upcoding_artifacts()  # Random Forest upcoding model
     yield
     # (shutdown logic here if needed)
 
