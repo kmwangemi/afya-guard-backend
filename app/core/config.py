@@ -17,8 +17,10 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
     ENVIRONMENT: str = "development"  # development | staging | production
+    LOG_LEVEL: str = "INFO"
     # ── Database (Neon PostgreSQL) ────────────────────────────────────────────
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/sha_fraud"
+    BASE_URL: str = "http://localhost:8000"
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
     DB_ECHO: bool = False
