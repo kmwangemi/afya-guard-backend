@@ -1,8 +1,23 @@
 """
 SHA Fraud Detection — Claim Schemas
 
-Covers: claim ingestion, service line items, member eligibility, provider info,
-        status updates, and SHA webhook event payload.
+Shaped to match the Afya Guard frontend exactly:
+
+  LIST VIEW  (claim.png)
+    Columns:  Claim #  |  Provider  |  Patient ID (masked)  |
+              Amount   |  Date      |  Risk Score pill      |  Status badge
+    Filters:  search (claim # or provider name), status, risk_level, county,
+              page, page_size
+
+  DETAIL VIEW  (claim-single.png)
+    Header:           sha_claim_id, provider_name, status pill, risk_score pill,
+                      claim_amount, service_date
+    Claim Information: patient_id_masked, provider_id, diagnosis, procedure,
+                       service_date_range, county
+    Fraud Analysis:    phantom_patient, upcoding, duplicate, provider_anomaly
+                       — each with their own sub-fields
+    Actions sidebar:   approve | reject | create_investigation | assign
+    Details sidebar:   submitted, created, last_updated
 """
 
 import uuid
@@ -17,10 +32,12 @@ from app.models.enums_model import (
     ClaimType,
     FacilityType,
     Gender,
+    RiskLevel,
 )
 from app.schemas.base_schema import BaseSchema, TimestampMixin, UUIDSchema
 
-# ── Service Line Item ─────────────────────────────────────────────────────────
+
+# ── Service line item ─────────────────────────────────────────────────────────
 
 
 class ClaimServiceCreate(BaseSchema):
@@ -40,17 +57,7 @@ class ClaimServiceResponse(UUIDSchema):
     is_upcoded: bool = False
 
 
-# ── Provider (slim, for embedding in claim responses) ─────────────────────────
-
-
-class ProviderSlim(BaseSchema):
-    id: uuid.UUID
-    sha_provider_code: str
-    name: str
-    county: Optional[str] = None
-    facility_type: Optional[FacilityType] = None
-    accreditation_status: Optional[AccreditationStatus] = None
-    high_risk_flag: bool = False
+# ── Provider ──────────────────────────────────────────────────────────────────
 
 
 class ProviderCreate(BaseSchema):
@@ -78,15 +85,7 @@ class ProviderResponse(UUIDSchema, TimestampMixin):
     high_risk_flag: bool = False
 
 
-# ── Member (slim, for embedding in claim responses) ───────────────────────────
-
-
-class MemberSlim(BaseSchema):
-    id: uuid.UUID
-    sha_member_id: str
-    gender: Optional[Gender] = None
-    county: Optional[str] = None
-    coverage_status: Optional[str] = None
+# ── Member ────────────────────────────────────────────────────────────────────
 
 
 class MemberCreate(BaseSchema):
@@ -105,99 +104,82 @@ class MemberResponse(UUIDSchema, TimestampMixin):
     county: Optional[str] = None
     coverage_status: Optional[str] = None
     scheme: Optional[str] = None
-    # national_id and date_of_birth intentionally omitted — PII, masked from API
 
 
-# ── Claim ─────────────────────────────────────────────────────────────────────
+# ── Claim create / update ─────────────────────────────────────────────────────
 
 
 class ClaimCreate(BaseSchema):
-    """
-    Payload to ingest a new claim into the fraud detection system.
-    Mirrors the SHA API claim submission format.
-    """
+    """Payload to ingest a new claim. Mirrors the SHA API format."""
 
-    sha_claim_id: str = Field(
-        max_length=100, description="SHA-issued claim reference number"
-    )
-    provider_code: str = Field(
-        description="SHA provider code — used to resolve provider_id"
-    )
-    member_id_sha: str = Field(description="SHA member ID — used to resolve member_id")
+    sha_claim_id: str = Field(max_length=100)
+    provider_code: str
+    member_id_sha: str
 
     claim_type: Optional[ClaimType] = None
     sha_status: ClaimStatus = ClaimStatus.SUBMITTED
 
     admission_date: Optional[date] = None
     discharge_date: Optional[date] = None
-
-    diagnosis_codes: List[str] = Field(default=[], description="ICD-10 codes")
+    diagnosis_codes: List[str] = Field(default=[])
     services: List[ClaimServiceCreate] = []
 
     total_claim_amount: Optional[float] = Field(None, ge=0)
     approved_amount: Optional[float] = Field(None, ge=0)
-
     submitted_at: Optional[datetime] = None
-    raw_payload: Optional[Dict[str, Any]] = Field(
-        None, description="Full original SHA payload stored verbatim"
-    )
+    raw_payload: Optional[Dict[str, Any]] = None
 
     @field_validator("diagnosis_codes")
     @classmethod
     def validate_icd_codes(cls, codes):
-        # Basic format check — ICD-10 codes are alphanumeric, 3–7 chars
         for code in codes:
-            if not 2 < len(code) <= 10:
+            if not (2 < len(code) <= 10):
                 raise ValueError(f"Invalid ICD-10 code length: {code}")
         return codes
 
 
 class ClaimStatusUpdate(BaseSchema):
-    """Update the SHA status of a claim (e.g. APPROVED, REJECTED)."""
-
     sha_status: ClaimStatus
     approved_amount: Optional[float] = Field(None, ge=0)
     note: Optional[str] = None
 
 
-class ClaimResponse(UUIDSchema, TimestampMixin):
-    sha_claim_id: str
-    claim_type: Optional[ClaimType] = None
-    sha_status: ClaimStatus
-    admission_date: Optional[date] = None
-    discharge_date: Optional[date] = None
-    diagnosis_codes: Optional[List[str]] = None
-    total_claim_amount: Optional[float] = None
-    approved_amount: Optional[float] = None
-    submitted_at: Optional[datetime] = None
-    processed_at: Optional[datetime] = None
-
-    provider: Optional[ProviderSlim] = None
-    member: Optional[MemberSlim] = None
-    services: List[ClaimServiceResponse] = []
-
-    # ADD THIS VALIDATOR — handles the datetime → date coercion
-    @field_validator("admission_date", "discharge_date", mode="before")
-    @classmethod
-    def coerce_datetime_to_date(cls, v):
-        if isinstance(v, datetime):
-            return v.date()
-        return v
-
-
-class ClaimDetailResponse(ClaimResponse):
-    """Full claim with features and latest fraud score."""
-
-    features: Optional["ClaimFeatureResponse"] = None
-    latest_fraud_score: Optional["FraudScoreSlim"] = None
+# ══════════════════════════════════════════════════════════════════════════════
+# LIST VIEW  —  claim.png
+# ══════════════════════════════════════════════════════════════════════════════
 
 
 class ClaimListFilter(BaseSchema):
-    """Query filters for GET /claims."""
+    """
+    Mirrors every control in the UI filter panel (claim.png).
 
+    search     — ILIKE on sha_claim_id OR provider.name
+    sha_status — maps to the Status dropdown
+                 UI label → enum value:
+                   "Pending"            → SUBMITTED
+                   "Approved"           → APPROVED
+                   "Rejected"           → REJECTED
+                   "Flagged"            → FLAGGED
+                   "Under Investigation"→ UNDER_REVIEW
+                   "Paid"               → PAID
+    risk_level — joined from the claim's latest FraudScore
+    county     — ILIKE on provider.county
+    """
+
+    search: Optional[str] = Field(
+        None, description="Search by claim number or provider name"
+    )
+    sha_status: Optional[ClaimStatus] = Field(
+        None, description="Filter by claim status"
+    )
+    risk_level: Optional[RiskLevel] = Field(
+        None, description="Filter by fraud risk level from latest score"
+    )
+    county: Optional[str] = Field(None, description="Filter by provider county")
+
+    # Non-UI advanced filters
     provider_id: Optional[uuid.UUID] = None
     member_id: Optional[uuid.UUID] = None
-    sha_status: Optional[ClaimStatus] = None
     claim_type: Optional[ClaimType] = None
     submitted_from: Optional[datetime] = None
     submitted_to: Optional[datetime] = None
@@ -205,7 +187,200 @@ class ClaimListFilter(BaseSchema):
     max_amount: Optional[float] = None
 
 
-# ── Feature Response (defined here to avoid circular imports) ─────────────────
+class ClaimListItem(BaseSchema):
+    """
+    One row in the claims table (claim.png).
+
+    Claim # | Provider | Patient ID | Amount | Date | Risk Score | Status
+    """
+
+    id: uuid.UUID
+    sha_claim_id: str  # "CLM-2024-000001"
+    provider_name: Optional[str] = None  # "MP Shah Medical Centre"
+    provider_id_code: Optional[str] = None  # "prov_005"
+
+    # Patient ID masked to last-4, e.g. "****4559"
+    member_sha_id_masked: Optional[str] = None
+
+    total_claim_amount: Optional[float] = None  # 378000.0
+    service_date: Optional[date] = None  # admission_date or submitted_at.date()
+
+    # Risk pill — number drives colour on the frontend
+    risk_score: Optional[float] = None  # 0–100
+    risk_level: Optional[RiskLevel] = None
+
+    # Status badge
+    status: ClaimStatus
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DETAIL VIEW  —  claim-single.png
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Claim Information card ────────────────────────────────────────────────────
+
+
+class ClaimInformation(BaseSchema):
+    """
+    Left-top card: Claim Information.
+    Shown fields (claim-single.png):
+      Patient ID (Masked) | Provider ID
+      Diagnosis           | Procedure
+      Service Date Range  | County
+    """
+
+    patient_id_masked: Optional[str] = None  # "****1697"
+    provider_id_code: Optional[str] = None  # "prov_005"
+    provider_name: Optional[str] = None  # "Coptic Hospital"
+
+    diagnosis: Optional[str] = None  # "Hypertension, Type 2 Diabetes, ..."
+    diagnosis_codes: List[str] = []  # raw ICD-10 codes
+
+    procedure: Optional[str] = None  # "Consultation, Blood Test, X-Ray"
+
+    service_date_from: Optional[date] = None  # admission_date
+    service_date_to: Optional[date] = None  # discharge_date
+
+    county: Optional[str] = None  # "Kisumu"
+
+
+# ── Per-detector fraud analysis blocks ───────────────────────────────────────
+
+
+class PhantomPatientAnalysis(BaseSchema):
+    """
+    'Phantom Patient Analysis' section (claim-single.png).
+    Shows green check when passed, red when failed.
+    Sub-fields: IPRS Status, Geographic Anomaly, Visit Frequency Anomaly.
+    """
+
+    detected: bool = False
+    iprs_status: str = "UNVERIFIED"  # "VERIFIED" | "NOT_FOUND" | "UNVERIFIED"
+    geographic_anomaly: bool = False  # "Yes" / "No"
+    visit_frequency_anomaly: bool = False  # "Yes" / "No"
+    confidence: float = 0.0  # 0–100, e.g. 82.0
+
+
+class DuplicateClaimAnalysis(BaseSchema):
+    """'Duplicate Claim' section in Fraud Analysis card."""
+
+    detected: bool = False
+    duplicate_count: int = 0
+    duplicate_claim_ids: List[str] = []  # sha_claim_ids of the duplicates
+    same_provider: bool = False
+    window_days: int = 7
+    confidence: float = 0.0
+
+
+class UpcodingAnalysis(BaseSchema):
+    """
+    'Upcoding Analysis' section (claim-single.png).
+    Sub-fields: Detected, Confidence (e.g. 14.9%).
+    """
+
+    detected: bool = False
+    flagged_service_codes: List[str] = []
+    flag_reasons: List[str] = []
+    confidence: float = 0.0  # e.g. 14.9
+
+
+class ProviderAnomalyAnalysis(BaseSchema):
+    """'Provider Anomaly' section in Fraud Analysis card."""
+
+    detected: bool = False
+    provider_vs_peer_ratio: Optional[float] = None  # 2.3 = 2.3× peer avg
+    high_risk_flag: bool = False
+    confidence: float = 0.0
+
+
+class FraudAnalysis(BaseSchema):
+    """
+    Full Fraud Analysis card — all four detector outputs.
+    Each sub-object maps 1:1 to a collapsible section in the UI.
+    """
+
+    overall_score: Optional[float] = None  # final_score 0–100
+    risk_level: Optional[RiskLevel] = None
+
+    phantom_patient: PhantomPatientAnalysis = PhantomPatientAnalysis()
+    duplicate_claim: DuplicateClaimAnalysis = DuplicateClaimAnalysis()
+    upcoding: UpcodingAnalysis = UpcodingAnalysis()
+    provider_anomaly: ProviderAnomalyAnalysis = ProviderAnomalyAnalysis()
+
+    # Top human-readable flags for quick banner display
+    top_flags: List[str] = []
+
+    # Score breakdown visible to analysts
+    rule_score: Optional[float] = None
+    ml_score: Optional[float] = None
+    detector_scores: Optional[Dict[str, float]] = None
+
+
+# ── Details sidebar ───────────────────────────────────────────────────────────
+
+
+class ClaimTimestamps(BaseSchema):
+    """
+    'Details' right sidebar (claim-single.png).
+    Fields: Submitted | Created | Last Updated
+    """
+
+    submitted: Optional[datetime] = None  # claim.submitted_at
+    created: Optional[datetime] = None  # claim.created_at
+    last_updated: Optional[datetime] = None  # claim.updated_at
+
+
+# ── Full detail response ──────────────────────────────────────────────────────
+
+
+class ClaimDetailResponse(BaseSchema):
+    """
+    Full single-claim API response matching claim-single.png.
+
+    Header         — sha_claim_id, provider_name, status, risk_score,
+                     claim_amount, service_date
+    Left top       — claim_information (Claim Information card)
+    Left bottom    — fraud_analysis (Fraud Analysis card)
+    Right top      — available_actions list → buttons
+    Right bottom   — details (timestamps)
+    """
+
+    # Header
+    id: uuid.UUID
+    sha_claim_id: str  # "CLM-2024-000001"
+    provider_name: Optional[str] = None  # "Coptic Hospital"
+
+    status: ClaimStatus  # "Pending"
+    risk_score: Optional[float] = None  # 0–100
+    risk_level: Optional[RiskLevel] = None  # drives pill colour
+    claim_amount: Optional[float] = None  # 67000.0
+    service_date: Optional[date] = None  # "19 Feb 2024"
+
+    # Cards
+    claim_information: ClaimInformation = ClaimInformation()
+    fraud_analysis: FraudAnalysis = FraudAnalysis()
+
+    # Actions sidebar
+    # Values: "approve" | "reject" | "create_investigation" | "assign"
+    available_actions: List[str] = []
+
+    # Details sidebar
+    details: ClaimTimestamps = ClaimTimestamps()
+
+    # Raw / extended fields
+    claim_type: Optional[ClaimType] = None
+    services: List[ClaimServiceResponse] = []
+    fraud_score_id: Optional[uuid.UUID] = None
+
+
+# ── Slim types used internally ────────────────────────────────────────────────
+
+
+class FraudScoreSlim(BaseSchema):
+    id: uuid.UUID
+    final_score: Optional[float] = None
+    risk_level: Optional[RiskLevel] = None
+    scored_at: Optional[datetime] = None
 
 
 class ClaimFeatureResponse(BaseSchema):
@@ -225,35 +400,18 @@ class ClaimFeatureResponse(BaseSchema):
     engineered_at: Optional[datetime] = None
 
 
-# ── Slim FraudScore (to embed in ClaimDetailResponse) ────────────────────────
-
-
-class FraudScoreSlim(BaseSchema):
-    id: uuid.UUID
-    final_score: Optional[float] = None
-    risk_level: Optional[str] = None
-    scored_at: Optional[datetime] = None
-
-
-# ── SHA Webhook Event ─────────────────────────────────────────────────────────
+# ── SHA Webhook ───────────────────────────────────────────────────────────────
 
 
 class SHAWebhookEvent(BaseSchema):
-    """
-    Payload SHA sends when a claim event occurs.
-    Triggers our auto-ingest + score pipeline.
-    """
-
-    claim_id: str = Field(description="SHA claim reference ID")
-    event: str = Field(description="e.g. CLAIM_SUBMITTED, CLAIM_UPDATED")
+    claim_id: str
+    event: str
     provider_code: Optional[str] = None
     timestamp: Optional[datetime] = None
-    claim_metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class SHAWebhookResponse(BaseSchema):
-    """What we return to SHA after processing a webhook."""
-
     claim_id: str
     received: bool = True
     fraud_score: Optional[float] = None
@@ -261,5 +419,4 @@ class SHAWebhookResponse(BaseSchema):
     recommendation: Optional[str] = None
 
 
-# Update forward refs
 ClaimDetailResponse.model_rebuild()
