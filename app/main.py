@@ -17,9 +17,14 @@ setup_logging()
 logger = get_logger(__name__)
 
 from app.api.v1.routes.admin_routes import router as admin_router
+from app.api.v1.routes.alert_routes import router as alert_router
 from app.api.v1.routes.auth_routes import router as auth_router
+from app.api.v1.routes.case_routes import router as case_router
 from app.api.v1.routes.claim_routes import router as claim_router
-from app.api.v1.routes.fraud_case_routes import router as fraud_case_router
+from app.api.v1.routes.dashboard_routes import router as dashboard_router
+from app.api.v1.routes.fraud_routes import router as fraud_case_router
+from app.api.v1.routes.provider_routes import router as provider_router
+from app.api.v1.routes.report_routes import router as report_router
 from app.api.v1.routes.user_routes import router as user_router
 from app.core.config import settings
 from app.core.scheduler import start_scheduler, stop_scheduler
@@ -75,6 +80,11 @@ app.include_router(user_router, prefix=PREFIX)
 app.include_router(claim_router, prefix=PREFIX)
 app.include_router(fraud_case_router, prefix=PREFIX)
 app.include_router(admin_router, prefix=PREFIX)
+app.include_router(alert_router, prefix=PREFIX)
+app.include_router(provider_router, prefix=PREFIX)
+app.include_router(dashboard_router, prefix=PREFIX)
+app.include_router(case_router, prefix=PREFIX)
+app.include_router(report_router, prefix=PREFIX)
 
 
 @app.get("/", tags=["Health"])

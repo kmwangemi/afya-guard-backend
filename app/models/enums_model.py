@@ -270,3 +270,42 @@ class DeliveryStatus(str, enum.Enum):
     DELIVERED = "DELIVERED"
     FAILED = "FAILED"
     SKIPPED = "SKIPPED"  # Channel disabled or no recipient configured
+
+
+# ---------------------------------------------------------------------------
+# Reports Domain
+# ---------------------------------------------------------------------------
+
+
+class ReportType(str, enum.Enum):
+    """Type of fraud detection report — maps to the Type column and generation dialog."""
+
+    SUMMARY = "summary"  # Weekly Fraud Summary
+    PROVIDER = "provider"  # Provider Risk Analysis
+    INVESTIGATION = "investigation"  # Investigation Outcomes
+    COUNTY = "county"  # County-wise Fraud Statistics
+
+
+class ReportStatus(str, enum.Enum):
+    """Lifecycle status of a report — drives the Status badge colour."""
+
+    PROCESSING = "processing"  # blue badge  — being generated
+    COMPLETED = "completed"  # green badge — ready to view/download
+    SCHEDULED = "scheduled"  # yellow badge
+    FAILED = "failed"  # red badge
+
+
+class DateRangePreset(str, enum.Enum):
+    """Preset date ranges available in the Generate Report dialog."""
+
+    WEEK = "week"
+    MONTH = "month"
+    QUARTER = "quarter"
+    YEAR = "year"
+    CUSTOM = "custom"
+
+
+class ReportAuditAction(str, enum.Enum):
+    REPORT_GENERATED = "REPORT_GENERATED"
+    REPORT_DOWNLOADED = "REPORT_DOWNLOADED"
+    REPORT_DELETED = "REPORT_DELETED"

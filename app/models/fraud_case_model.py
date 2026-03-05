@@ -4,8 +4,16 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Numeric, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import (
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    Numeric,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -37,6 +45,12 @@ class FraudCase(Base):
         nullable=False,
         index=True,
     )
+    case_number: Mapped[int] = mapped_column(
+        Integer,
+        autoincrement=True,
+        unique=True,
+        nullable=False,
+    )
     fraud_score_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("fraud_scores.id"),
@@ -67,6 +81,21 @@ class FraudCase(Base):
     )
     estimated_loss: Mapped[Optional[float]] = mapped_column(
         Numeric(14, 2), comment="Estimated financial loss if confirmed fraud"
+    )
+    # Investigation workflow fields (shown in INV detail page)
+    findings: Mapped[Optional[str]] = mapped_column(
+        Text, comment="Analyst findings narrative"
+    )
+    progress: Mapped[int] = mapped_column(
+        Integer, default=0, comment="Investigation progress 0–100%"
+    )
+    target_date: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), comment="Target completion date"
+    )
+    evidence: Mapped[Optional[list]] = mapped_column(
+        JSONB,
+        default=list,
+        comment='Evidence files: [{"id":..,"file_name":..,"file_type":..,"file_url":..,"uploaded_by":..,"uploaded_at":..}]',
     )
     # Timestamps
     opened_at: Mapped[datetime] = mapped_column(

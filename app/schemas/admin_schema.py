@@ -10,14 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import Field
 
-from app.models.enums_model import (
-    AlertChannel,
-    AlertSeverity,
-    AlertStatus,
-    AlertType,
-    DeliveryStatus,
-    ModelType,
-)
+from app.models.enums_model import ModelType
 from app.schemas.base_schema import BaseSchema, TimestampMixin, UUIDSchema
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -101,73 +94,6 @@ class ModelDeployResponse(BaseSchema):
     is_deployed: bool
     deployed_at: datetime
     message: str
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# FRAUD ALERTS
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class AlertNotificationResponse(UUIDSchema):
-    channel: AlertChannel
-    recipient: Optional[str] = None
-    delivery_status: DeliveryStatus
-    attempt_count: int
-    last_attempt_at: Optional[datetime] = None
-    delivered_at: Optional[datetime] = None
-    response_code: Optional[int] = None
-    error_message: Optional[str] = None
-
-
-class FraudAlertResponse(UUIDSchema):
-    claim_id: uuid.UUID
-    fraud_score_id: Optional[uuid.UUID] = None
-    fraud_case_id: Optional[uuid.UUID] = None
-    alert_type: AlertType
-    severity: AlertSeverity
-    status: AlertStatus
-    title: str
-    message: str
-    triggered_by: Optional[str] = None
-    score_at_alert: Optional[float] = None
-    assigned_to: Optional[uuid.UUID] = None
-    assigned_analyst_name: Optional[str] = None
-    auto_escalate: bool
-    auto_escalate_after_hours: Optional[int] = None
-    escalated_at: Optional[datetime] = None
-    expires_at: Optional[datetime] = None
-    is_false_positive: Optional[bool] = None
-    resolution_note: Optional[str] = None
-    raised_at: datetime
-    acknowledged_at: Optional[datetime] = None
-    resolved_at: Optional[datetime] = None
-    fraud_alert_metadata: Optional[Dict[str, Any]] = None
-    notifications: List[AlertNotificationResponse] = []
-    # Denormalised for quick display
-    sha_claim_id: Optional[str] = None
-    provider_name: Optional[str] = None
-
-
-class AlertAcknowledgeRequest(BaseSchema):
-    note: Optional[str] = None
-
-
-class AlertResolveRequest(BaseSchema):
-    resolution_note: str = Field(min_length=5)
-    is_false_positive: bool = False
-
-
-class AlertAssignRequest(BaseSchema):
-    assigned_to: uuid.UUID
-
-
-class AlertListFilter(BaseSchema):
-    status: Optional[AlertStatus] = None
-    severity: Optional[AlertSeverity] = None
-    alert_type: Optional[AlertType] = None
-    assigned_to: Optional[uuid.UUID] = None
-    raised_from: Optional[datetime] = None
-    raised_to: Optional[datetime] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

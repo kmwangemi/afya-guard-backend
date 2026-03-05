@@ -52,6 +52,12 @@ class User(Base):
         DateTime(timezone=True),
         comment="Account locked until this datetime after too many failed logins",
     )
+    # Organisation
+    department: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="e.g. 'Fraud Investigation', 'Data Science', 'Compliance'",
+    )
     # Password policy
     password_changed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True)
