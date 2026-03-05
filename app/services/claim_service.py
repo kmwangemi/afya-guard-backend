@@ -16,6 +16,8 @@ Key design notes:
 
 import uuid
 from datetime import UTC, datetime
+from datetime import date as _date
+from datetime import datetime as _datetime
 from typing import List, Optional, Tuple
 
 from fastapi import HTTPException, status
@@ -51,6 +53,25 @@ from app.schemas.claim_schema import (
     UpcodingAnalysis,
 )
 from app.services.audit_service import AuditService
+
+
+def _to_date(value) -> _date | None:
+    """
+    Normalise a date/datetime value to a plain date.
+
+    asyncpg returns PostgreSQL DATE columns as timezone-aware datetime objects
+    (e.g. datetime(2026, 2, 19, 00:00:00, tzinfo=UTC)) instead of plain date.
+    Pydantic v2 rejects these unless the time is exactly midnight, hence the
+    ValidationError you're seeing. This helper handles both cases safely.
+    """
+    if value is None:
+        return None
+    if isinstance(value, _datetime):
+        return value.date()
+    if isinstance(value, _date):
+        return value
+    return None
+
 
 # ── Reusable eager-load query ─────────────────────────────────────────────────
 
@@ -511,8 +532,8 @@ class ClaimService_:
             raw_id = claim.member.sha_member_id if claim.member else None
             masked = f"****{raw_id[-4:]}" if raw_id and len(raw_id) >= 4 else raw_id
 
-            service_date = claim.admission_date or (
-                claim.submitted_at.date() if claim.submitted_at else None
+            service_date = _to_date(claim.admission_date) or _to_date(
+                claim.submitted_at
             )
 
             items.append(
@@ -529,7 +550,7 @@ class ClaimService_:
                         if claim.total_claim_amount
                         else None
                     ),
-                    # service_date=service_date,
+                    service_date=service_date,
                     risk_score=(
                         float(latest_score.final_score)
                         if latest_score and latest_score.final_score
@@ -586,9 +607,8 @@ class ClaimService_:
         )
 
         # ── Header ────────────────────────────────────────────────────────────
-        service_date = claim.admission_date or (
-            claim.submitted_at.date() if claim.submitted_at else None
-        )
+
+        service_date = _to_date(claim.admission_date) or _to_date(claim.submitted_at)
 
         # ── Claim Information card ────────────────────────────────────────────
         raw_id = claim.member.sha_member_id if claim.member else None
@@ -617,8 +637,8 @@ class ClaimService_:
             diagnosis=diagnosis_str,
             diagnosis_codes=claim.diagnosis_codes or [],
             procedure=procedure_str,
-            # service_date_from=claim.admission_date,
-            # service_date_to=claim.discharge_date,
+            service_date_from=_to_date(claim.admission_date),
+            service_date_to=_to_date(claim.discharge_date),
             county=claim.provider.county if claim.provider else None,
         )
 
@@ -636,7 +656,7 @@ class ClaimService_:
             claim_amount=(
                 float(claim.total_claim_amount) if claim.total_claim_amount else None
             ),
-            # service_date=service_date,
+            service_date=service_date,
             claim_information=claim_info,
             fraud_analysis=_build_fraud_analysis(claim, latest_score),
             available_actions=_available_actions(claim, latest_score),

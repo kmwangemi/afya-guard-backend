@@ -2,12 +2,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import Boolean, DateTime, Enum, Numeric, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.models.enums_model import FacilityType, AccreditationStatus
 
 from app.core.database import Base
+from app.models.enums_model import AccreditationStatus, FacilityType
 
 if TYPE_CHECKING:
     from app.models.claim_model import Claim
@@ -51,6 +51,7 @@ class Provider(Base):
     avg_claim_amount: Mapped[Optional[float]] = mapped_column(
         Numeric(14, 2), comment="Rolling average claim amount for this provider"
     )
+    bed_capacity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     peer_avg: Mapped[Optional[float]] = mapped_column(
         Numeric(14, 2),
         comment="Average claim amount for peer providers in same county/type",

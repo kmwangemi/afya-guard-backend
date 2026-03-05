@@ -5,7 +5,8 @@ Covers: login, token responses, password change, token refresh.
 """
 
 import uuid
-from typing import List
+from datetime import datetime
+from typing import List, Optional
 
 from pydantic import EmailStr, Field, field_validator
 
@@ -71,9 +72,13 @@ class AuthUserResponse(BaseSchema):
     id: uuid.UUID
     email: str
     full_name: str
-    roles: List[str] = []
+    phone: Optional[str] = None
+    is_active: bool
     is_superuser: bool
+    last_login_at: Optional[datetime] = None
     must_change_password: bool
+    department: Optional[str] = None
+    roles: List[str] = []
 
 
 class LoginResponse(BaseSchema):
