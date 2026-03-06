@@ -69,15 +69,11 @@ class AuthUserResponse(BaseSchema):
     Shows only what the frontend needs immediately after login.
     """
 
-    id: uuid.UUID
     email: str
     full_name: str
-    phone: Optional[str] = None
     is_active: bool
     is_superuser: bool
-    last_login_at: Optional[datetime] = None
     must_change_password: bool
-    department: Optional[str] = None
     roles: List[str] = []
 
 

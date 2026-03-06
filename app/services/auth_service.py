@@ -115,15 +115,11 @@ class AuthService:
                 expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
             ),
             user=AuthUserResponse(
-                id=user.id,
                 email=user.email,
                 full_name=user.full_name,
                 roles=[r.name for r in user.roles],  # ✅ safe — eagerly loaded
                 is_superuser=user.is_superuser,
                 must_change_password=user.must_change_password,
-                department=user.department,
-                last_login_at=user.last_login_at,
-                phone=user.phone,
                 is_active=user.is_active,
             ),
         )
