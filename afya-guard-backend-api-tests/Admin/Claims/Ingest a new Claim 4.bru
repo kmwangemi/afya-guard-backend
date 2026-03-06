@@ -1,0 +1,70 @@
+meta {
+  name: Ingest a new Claim 4
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{local_url}}/claims
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+      "sha_claim_id": "SHA-CLM-2026-00091004",
+      "provider_code": "FAC-NKR-00081",
+      "member_id_sha": "SHA-KE-20250005671",
+      "claim_type": "OUTPATIENT",
+      "sha_status": "SUBMITTED",
+      "admission_date": "2026-02-10",
+      "discharge_date": "2026-02-10",
+      "diagnosis_codes": ["B34.9"],
+      "services": [
+        {
+          "service_code": "CONSULT-OPD-001",
+          "service_name": "Outpatient Consultation",
+          "quantity": 1,
+          "unit_price": 1600.0,
+          "total_price": 1600.0,
+          "service_date": "2026-02-10"
+        },
+        {
+          "service_code": "LAB-CBC-002",
+          "service_name": "Complete Blood Count",
+          "quantity": 1,
+          "unit_price": 1200.0,
+          "total_price": 1200.0,
+          "service_date": "2026-02-10"
+        }
+      ],
+      "total_claim_amount": 2800.0,
+      "approved_amount": 0,
+      "submitted_at": "2026-02-10T13:00:00.000Z",
+      "raw_payload": {
+        "fhir_bundle_id": "bundle-sha-test-013",
+        "encounter_type": "AMB",
+        "practitioner_id": "PRAC-KE-00321",
+        "practitioner_name": "Dr. Alice Wambui",
+        "patient_name": "James Kamau",
+        "patient_dob": "1990-05-10",
+        "patient_gender": "male",
+        "national_id": "30456789",
+        "facility_name": "Nakuru Level 5 Hospital",
+        "facility_level": "LEVEL_5",
+        "county": "Nakuru",
+        "scheme": "SHIF",
+        "coverage_period": {
+          "start": "2026-01-01",
+          "end": "2026-12-31"
+        },
+        "eligibility_checked": true,
+        "preauth_id": "PREAUTH-NKR-2026-00121",
+        "source_system": "NAKURU-HMIS-v2.8"
+      }
+    }
+}

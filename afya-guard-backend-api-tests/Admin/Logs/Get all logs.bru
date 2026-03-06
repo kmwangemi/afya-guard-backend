@@ -1,13 +1,17 @@
 meta {
-  name: Get claim by Id
+  name: Get all logs
   type: http
-  seq: 7
+  seq: 1
 }
 
 get {
-  url: {{local_url}}/claims/4559341b-50a7-418a-973a-b4f8e36fc61f
+  url: {{local_url}}/logs
   body: none
   auth: bearer
+}
+
+params:query {
+  ~page: 1
 }
 
 auth:bearer {

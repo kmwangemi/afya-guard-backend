@@ -1,0 +1,138 @@
+meta {
+  name: Ingest a new Claim 3
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{local_url}}/claims
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{auth_token}}
+}
+
+body:json {
+  {
+      "sha_claim_id": "SHA-CLM-2026-00091002",
+      "provider_code": "FAC-KSM-00411",
+      "member_id_sha": "SHA-KE-20240008812",
+      "claim_type": "OUTPATIENT",
+      "sha_status": "SUBMITTED",
+      "admission_date": "2026-02-05",
+      "discharge_date": "2026-02-05",
+      "diagnosis_codes": ["J06.9"],
+      "services": [
+        {
+          "service_code": "CONSULT-OPD-001",
+          "service_name": "Outpatient Consultation",
+          "quantity": 1,
+          "unit_price": 1500.0,
+          "total_price": 1500.0,
+          "service_date": "2026-02-05"
+        },
+        {
+          "service_code": "LAB-MAL-001",
+          "service_name": "Malaria Test",
+          "quantity": 1,
+          "unit_price": 800.0,
+          "total_price": 800.0,
+          "service_date": "2026-02-05"
+        },
+        {
+          "service_code": "DRUG-PARA-500",
+          "service_name": "Paracetamol 500mg",
+          "quantity": 10,
+          "unit_price": 10.0,
+          "total_price": 100.0,
+          "service_date": "2026-02-05"
+        }
+      ],
+      "total_claim_amount": 2400.0,
+      "approved_amount": 0,
+      "submitted_at": "2026-02-05T15:10:00.000Z",
+      "raw_payload": {
+        "fhir_bundle_id": "bundle-sha-test-011",
+        "encounter_type": "AMB",
+        "practitioner_id": "PRAC-KE-00712",
+        "practitioner_name": "Dr. Peter Ochieng",
+        "patient_name": "Faith Atieno Onyango",
+        "patient_dob": "1995-11-02",
+        "patient_gender": "female",
+        "national_id": "31245678",
+        "facility_name": "Jaramogi Oginga Odinga Teaching and Referral Hospital",
+        "facility_level": "LEVEL_5",
+        "county": "Kisumu",
+        "scheme": "SHIF",
+        "coverage_period": {
+          "start": "2026-01-01",
+          "end": "2026-12-31"
+        },
+        "eligibility_checked": true,
+        "preauth_id": "PREAUTH-KSM-2026-00421",
+        "source_system": "JOOTRH-HMIS-v3.0"
+      }
+    },
+    {
+      "sha_claim_id": "SHA-CLM-2026-00091003",
+      "provider_code": "FAC-ELD-00201",
+      "member_id_sha": "SHA-KE-20250001211",
+      "claim_type": "INPATIENT",
+      "sha_status": "SUBMITTED",
+      "admission_date": "2026-01-30",
+      "discharge_date": "2026-02-03",
+      "diagnosis_codes": ["A09"],
+      "services": [
+        {
+          "service_code": "CONSULT-SPEC-002",
+          "service_name": "Internal Medicine Consultation",
+          "quantity": 1,
+          "unit_price": 3200.0,
+          "total_price": 3200.0,
+          "service_date": "2026-01-30"
+        },
+        {
+          "service_code": "LAB-STOOL-001",
+          "service_name": "Stool Analysis",
+          "quantity": 1,
+          "unit_price": 900.0,
+          "total_price": 900.0,
+          "service_date": "2026-01-31"
+        },
+        {
+          "service_code": "WARD-GEN-DAY",
+          "service_name": "General Ward Bed (per day)",
+          "quantity": 4,
+          "unit_price": 1800.0,
+          "total_price": 7200.0,
+          "service_date": "2026-01-30"
+        }
+      ],
+      "total_claim_amount": 11300.0,
+      "approved_amount": 0,
+      "submitted_at": "2026-02-03T09:20:00.000Z",
+      "raw_payload": {
+        "fhir_bundle_id": "bundle-sha-test-012",
+        "encounter_type": "IMP",
+        "practitioner_id": "PRAC-KE-00590",
+        "practitioner_name": "Dr. Joseph Kiptoo",
+        "patient_name": "Daniel Kiprotich",
+        "patient_dob": "1982-09-15",
+        "patient_gender": "male",
+        "national_id": "29871234",
+        "facility_name": "Moi Teaching and Referral Hospital",
+        "facility_level": "LEVEL_6",
+        "county": "Uasin Gishu",
+        "scheme": "SHIF",
+        "coverage_period": {
+          "start": "2026-01-01",
+          "end": "2026-12-31"
+        },
+        "eligibility_checked": true,
+        "preauth_id": "PREAUTH-ELD-2026-00341",
+        "source_system": "MTRH-HMIS-v4.0"
+      }
+    }
+}
