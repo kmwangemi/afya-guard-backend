@@ -33,9 +33,9 @@ from app.models.enums_model import (
     FacilityType,
     Gender,
     RiskLevel,
+    FacilityLevel,
 )
 from app.schemas.base_schema import BaseSchema, TimestampMixin, UUIDSchema
-
 
 # ── Service line item ─────────────────────────────────────────────────────────
 
@@ -66,9 +66,11 @@ class ProviderCreate(BaseSchema):
     county: Optional[str] = None
     sub_county: Optional[str] = None
     facility_type: Optional[FacilityType] = None
+    facility_level: Optional[FacilityLevel] = None  # ← add this
     accreditation_status: Optional[AccreditationStatus] = AccreditationStatus.ACTIVE
     phone: Optional[str] = None
     email: Optional[str] = None
+    bed_capacity: Optional[int] = None  # ← add this
 
 
 class ProviderResponse(UUIDSchema, TimestampMixin):
@@ -77,9 +79,11 @@ class ProviderResponse(UUIDSchema, TimestampMixin):
     county: Optional[str] = None
     sub_county: Optional[str] = None
     facility_type: Optional[FacilityType] = None
+    facility_level: Optional[FacilityLevel] = None  # ← add this
     accreditation_status: Optional[AccreditationStatus] = None
     phone: Optional[str] = None
     email: Optional[str] = None
+    bed_capacity: Optional[int] = None  # ← add this
     avg_claim_amount: Optional[float] = None
     peer_avg: Optional[float] = None
     high_risk_flag: bool = False
@@ -109,21 +113,15 @@ class MemberResponse(UUIDSchema, TimestampMixin):
 # ── Claim create / update ─────────────────────────────────────────────────────
 
 
-class ClaimCreate(BaseSchema):
-    """Payload to ingest a new claim. Mirrors the SHA API format."""
+class ClaimData(BaseSchema):
+    """The claim-specific fields, nested under 'claim' key in the payload."""
 
     sha_claim_id: str = Field(max_length=100)
-    provider_code: str
-    member_id_sha: str
-
     claim_type: Optional[ClaimType] = None
     sha_status: ClaimStatus = ClaimStatus.SUBMITTED
-
-    admission_date: Optional[date] = None
-    discharge_date: Optional[date] = None
+    admission_date: Optional[datetime] = None
+    discharge_date: Optional[datetime] = None
     diagnosis_codes: List[str] = Field(default=[])
-    services: List[ClaimServiceCreate] = []
-
     total_claim_amount: Optional[float] = Field(None, ge=0)
     approved_amount: Optional[float] = Field(None, ge=0)
     submitted_at: Optional[datetime] = None
@@ -136,6 +134,21 @@ class ClaimCreate(BaseSchema):
             if not (2 < len(code) <= 10):
                 raise ValueError(f"Invalid ICD-10 code length: {code}")
         return codes
+
+
+class ClaimCreate(BaseSchema):
+    """
+    Nested ingest payload. Mirrors the structured SHA payload format:
+      claim    — core claim fields
+      provider — provider upsert data
+      member   — member upsert data
+      services — line items
+    """
+
+    claim: ClaimData
+    provider: ProviderCreate
+    member: MemberCreate
+    services: List[ClaimServiceCreate] = []
 
 
 class ClaimStatusUpdate(BaseSchema):
@@ -176,7 +189,6 @@ class ClaimListFilter(BaseSchema):
         None, description="Filter by fraud risk level from latest score"
     )
     county: Optional[str] = Field(None, description="Filter by provider county")
-
     # Non-UI advanced filters
     provider_id: Optional[uuid.UUID] = None
     member_id: Optional[uuid.UUID] = None
@@ -198,17 +210,13 @@ class ClaimListItem(BaseSchema):
     sha_claim_id: str  # "CLM-2024-000001"
     provider_name: Optional[str] = None  # "MP Shah Medical Centre"
     provider_id_code: Optional[str] = None  # "prov_005"
-
     # Patient ID masked to last-4, e.g. "****4559"
     member_sha_id_masked: Optional[str] = None
-
     total_claim_amount: Optional[float] = None  # 378000.0
     service_date: Optional[date] = None  # admission_date or submitted_at.date()
-
     # Risk pill — number drives colour on the frontend
     risk_score: Optional[float] = None  # 0–100
     risk_level: Optional[RiskLevel] = None
-
     # Status badge
     status: ClaimStatus
 
@@ -232,15 +240,11 @@ class ClaimInformation(BaseSchema):
     patient_id_masked: Optional[str] = None  # "****1697"
     provider_id_code: Optional[str] = None  # "prov_005"
     provider_name: Optional[str] = None  # "Coptic Hospital"
-
     diagnosis: Optional[str] = None  # "Hypertension, Type 2 Diabetes, ..."
     diagnosis_codes: List[str] = []  # raw ICD-10 codes
-
     procedure: Optional[str] = None  # "Consultation, Blood Test, X-Ray"
-
     service_date_from: Optional[date] = None  # admission_date
     service_date_to: Optional[date] = None  # discharge_date
-
     county: Optional[str] = None  # "Kisumu"
 
 
@@ -301,15 +305,12 @@ class FraudAnalysis(BaseSchema):
 
     overall_score: Optional[float] = None  # final_score 0–100
     risk_level: Optional[RiskLevel] = None
-
     phantom_patient: PhantomPatientAnalysis = PhantomPatientAnalysis()
     duplicate_claim: DuplicateClaimAnalysis = DuplicateClaimAnalysis()
     upcoding: UpcodingAnalysis = UpcodingAnalysis()
     provider_anomaly: ProviderAnomalyAnalysis = ProviderAnomalyAnalysis()
-
     # Top human-readable flags for quick banner display
     top_flags: List[str] = []
-
     # Score breakdown visible to analysts
     rule_score: Optional[float] = None
     ml_score: Optional[float] = None
@@ -349,24 +350,19 @@ class ClaimDetailResponse(BaseSchema):
     id: uuid.UUID
     sha_claim_id: str  # "CLM-2024-000001"
     provider_name: Optional[str] = None  # "Coptic Hospital"
-
     status: ClaimStatus  # "Pending"
     risk_score: Optional[float] = None  # 0–100
     risk_level: Optional[RiskLevel] = None  # drives pill colour
     claim_amount: Optional[float] = None  # 67000.0
     service_date: Optional[date] = None  # "19 Feb 2024"
-
     # Cards
     claim_information: ClaimInformation = ClaimInformation()
     fraud_analysis: FraudAnalysis = FraudAnalysis()
-
     # Actions sidebar
     # Values: "approve" | "reject" | "create_investigation" | "assign"
     available_actions: List[str] = []
-
     # Details sidebar
     details: ClaimTimestamps = ClaimTimestamps()
-
     # Raw / extended fields
     claim_type: Optional[ClaimType] = None
     services: List[ClaimServiceResponse] = []

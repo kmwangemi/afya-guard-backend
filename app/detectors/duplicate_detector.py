@@ -75,10 +75,8 @@ class DuplicateDetector(BaseDetector):
         """
         # Step 1: Build fingerprint for this claim
         fingerprint = self._build_fingerprint(claim)
-
         # Step 2: Fetch candidate claims (same member, last 30 days)
         candidates = await self._fetch_candidates(claim)
-
         if not candidates:
             return DetectorResult(
                 detector_name=self.name,
@@ -89,7 +87,6 @@ class DuplicateDetector(BaseDetector):
                 feature_value="0.0",
                 metadata={"fingerprint": fingerprint, "candidates_checked": 0},
             )
-
         # Step 3: Check for exact fingerprint match first
         exact_match = await self._check_exact_match(fingerprint, candidates)
         if exact_match:
@@ -112,12 +109,10 @@ class DuplicateDetector(BaseDetector):
                     "candidates_checked": len(candidates),
                 },
             )
-
         # Step 4: Fuzzy similarity scoring against all candidates
         best_score, best_match, breakdown = self._find_best_fuzzy_match(
             claim, candidates
         )
-
         if best_score >= SOFT_DUPLICATE_THRESHOLD and best_match:
             fired = best_score >= DUPLICATE_THRESHOLD
             final_score = round(best_score * 100, 4)  # scale to 0–100
@@ -150,7 +145,6 @@ class DuplicateDetector(BaseDetector):
                     "threshold": DUPLICATE_THRESHOLD,
                 },
             )
-
         return DetectorResult(
             detector_name=self.name,
             score=0.0,

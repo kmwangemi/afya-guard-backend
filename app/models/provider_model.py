@@ -7,7 +7,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.models.enums_model import AccreditationStatus, FacilityType
+from app.models.enums_model import AccreditationStatus, FacilityLevel, FacilityType
 
 if TYPE_CHECKING:
     from app.models.claim_model import Claim
@@ -38,6 +38,10 @@ class Provider(Base):
     sub_county: Mapped[Optional[str]] = mapped_column(String(100))
     facility_type: Mapped[Optional[FacilityType]] = mapped_column(
         Enum(FacilityType, name="facility_type_enum")
+    )
+    facility_level: Mapped[Optional[FacilityLevel]] = mapped_column(
+        Enum(FacilityLevel, name="facility_level_enum"),
+        nullable=True,
     )
     accreditation_status: Mapped[Optional[AccreditationStatus]] = mapped_column(
         Enum(AccreditationStatus, name="accreditation_status_enum"),

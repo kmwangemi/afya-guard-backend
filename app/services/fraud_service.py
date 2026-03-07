@@ -51,6 +51,7 @@ from app.models.fraud_score_model import FraudScore
 from app.models.model_version_model import ModelVersion
 from app.services.audit_service import AuditService
 from app.services.feature_service import FeatureService
+from app.utils.provider_utils import parse_facility_level
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +329,7 @@ class FraudService:
             los = float(features.length_of_stay or 0) if features else 0.0
             svc_count = int(features.service_count or 1) if features else 1
             provider = getattr(claim, "provider", None)
-            fac_level = int(getattr(provider, "facility_level", 4) or 4)
+            fac_level = parse_facility_level(provider)
             s_hour = (
                 int(getattr(features, "submitted_hour", 12) or 12) if features else 12
             )
@@ -426,7 +427,7 @@ class FraudService:
         amount = float(claim.total_claim_amount or 0) if claim else 0.0
         los = float(features.length_of_stay or 0)
         svc_count = int(features.service_count or 1)
-        fac_level = int(getattr(provider, "facility_level", 4) or 4) if provider else 4
+        fac_level = parse_facility_level(provider) if provider else 4
         claim_type_raw = (claim.claim_type or "OUTPATIENT") if claim else "OUTPATIENT"
         claim_type_enc = 0 if str(claim_type_raw).upper() == "INPATIENT" else 1
         county = getattr(provider, "county", "Nairobi") or "Nairobi"

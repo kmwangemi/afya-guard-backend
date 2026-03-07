@@ -39,7 +39,7 @@ from app.services.fraud_service import load_ml_artifacts
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(
-        "Procurement system API starting",
+        "SHA system API starting",
         extra={"version": settings.APP_VERSION, "environment": settings.ENVIRONMENT},
     )
     start_scheduler()
@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
     load_upcoding_artifacts()  # Random Forest upcoding model
     yield
     stop_scheduler()
-    logger.info("Procurement system API shut down")
+    logger.info("SHA system API shut down")
 
 
 app = FastAPI(

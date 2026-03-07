@@ -204,12 +204,19 @@ class DashboardService:
     @staticmethod
     async def get_trend(db: AsyncSession, days: int = 30) -> List[TrendData]:
         """
-        Return one TrendData point per day for the last `days` days.
-        Uses DATE_TRUNC + GROUP BY — one query for the whole date range.
+        Return one TrendData point per day.
+        Window starts from the earliest submitted_at in DB if it's older than `days`.
         """
-        since = datetime.now(UTC) - timedelta(days=days)
+        now = datetime.now(UTC)
+        default_since = now - timedelta(days=days)
 
-        # Daily total and flagged claim counts
+        # Find the earliest claim submission date
+        earliest_result = await db.execute(
+            select(func.min(Claim.submitted_at))
+        )
+        earliest = earliest_result.scalar_one()
+        # Use whichever is older — default window or earliest claim
+        since = min(default_since, earliest) if earliest else default_since
         daily = await db.execute(
             select(
                 func.date_trunc("day", Claim.submitted_at).label("day"),
