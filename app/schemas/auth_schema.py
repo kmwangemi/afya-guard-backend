@@ -4,9 +4,7 @@ SHA Fraud Detection — Auth Schemas
 Covers: login, token responses, password change, token refresh.
 """
 
-import uuid
-from datetime import datetime
-from typing import List, Optional
+from typing import List
 
 from pydantic import EmailStr, Field, field_validator
 

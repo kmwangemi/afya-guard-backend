@@ -15,9 +15,7 @@ Key design notes:
 """
 
 import uuid
-from datetime import UTC, datetime
-from datetime import date as _date
-from datetime import datetime as _datetime
+from datetime import UTC, date, datetime
 from typing import List, Optional, Tuple
 
 from fastapi import HTTPException, status
@@ -55,7 +53,7 @@ from app.schemas.claim_schema import (
 from app.services.audit_service import AuditService
 
 
-def _to_date(value) -> _date | None:
+def _to_date(value) -> date | None:
     """
     Normalise a date/datetime value to a plain date.
 
@@ -66,9 +64,9 @@ def _to_date(value) -> _date | None:
     """
     if value is None:
         return None
-    if isinstance(value, _datetime):
+    if isinstance(value, datetime):
         return value.date()
-    if isinstance(value, _date):
+    if isinstance(value, date):
         return value
     return None
 
@@ -102,21 +100,17 @@ def _available_actions(claim: Claim, latest_score: Optional[FraudScore]) -> List
     """
     terminal = {ClaimStatus.APPROVED, ClaimStatus.REJECTED, ClaimStatus.PAID}
     actions = []
-
     if claim.sha_status not in terminal:
         actions.append("approve")
         actions.append("reject")
-
     if (
         latest_score
         and latest_score.risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)
         and not claim.fraud_case
     ):
         actions.append("create_investigation")
-
     if claim.sha_status not in terminal:
         actions.append("assign")
-
     return actions
 
 
@@ -132,29 +126,23 @@ def _build_fraud_analysis(
     """
     if not latest_score:
         return FraudAnalysis()
-
     explanations = latest_score.explanations or []
     detector_scores: dict = latest_score.detector_scores or {}
-
     # ── Phantom Patient ───────────────────────────────────────────────────────
     phantom_score = detector_scores.get("PhantomPatientDetector", 0.0)
-
     iprs_status = (
         "VERIFIED" if (claim.member and claim.member.national_id) else "UNVERIFIED"
     )
-
     geographic_anomaly = False
     if claim.member and claim.provider:
         m_county = (claim.member.county or "").upper()
         p_county = (claim.provider.county or "").upper()
         geographic_anomaly = bool(m_county and p_county and m_county != p_county)
-
     visit_anomaly = bool(
         claim.features
         and claim.features.member_visits_30d
         and claim.features.member_visits_30d > 4
     )
-
     phantom = PhantomPatientAnalysis(
         detected=phantom_score >= 20,
         iprs_status=iprs_status,
@@ -162,10 +150,8 @@ def _build_fraud_analysis(
         visit_frequency_anomaly=visit_anomaly,
         confidence=round(phantom_score, 1),
     )
-
     # ── Duplicate Claim ───────────────────────────────────────────────────────
     dup_score = detector_scores.get("DuplicateDetector", 0.0)
-
     # Pull duplicate claim ids from explanation metadata if stored
     dup_meta_exp = next(
         (
@@ -181,7 +167,6 @@ def _build_fraud_analysis(
             dup_count = int(dup_meta_exp.feature_value) if dup_meta_exp else 1
         except (ValueError, TypeError):
             dup_count = 1
-
     duplicate = DuplicateClaimAnalysis(
         detected=dup_score >= 50,
         duplicate_count=dup_count,
@@ -190,7 +175,6 @@ def _build_fraud_analysis(
         window_days=7,
         confidence=round(dup_score, 1),
     )
-
     # ── Upcoding ──────────────────────────────────────────────────────────────
     up_score = detector_scores.get("UpcodingDetector", 0.0)
     flagged_codes = [
@@ -203,14 +187,12 @@ def _build_fraud_analysis(
         for e in explanations
         if e.source == "UpcodingDetector" and e.explanation
     ]
-
     upcoding = UpcodingAnalysis(
         detected=up_score >= 30,
         flagged_service_codes=flagged_codes,
         flag_reasons=up_reasons,
         confidence=round(up_score, 1),
     )
-
     # ── Provider Anomaly ──────────────────────────────────────────────────────
     prov_score = detector_scores.get("ProviderProfiler", 0.0)
     peer_ratio = None
@@ -221,21 +203,18 @@ def _build_fraud_analysis(
         and claim.provider.peer_avg > 0
     ):
         peer_ratio = round(claim.provider.avg_claim_amount / claim.provider.peer_avg, 2)
-
     provider_anomaly = ProviderAnomalyAnalysis(
         detected=prov_score >= 30,
         provider_vs_peer_ratio=peer_ratio,
         high_risk_flag=claim.provider.high_risk_flag if claim.provider else False,
         confidence=round(prov_score, 1),
     )
-
     # ── Top flags ─────────────────────────────────────────────────────────────
     top_flags = [
         e.explanation
         for e in sorted(explanations, key=lambda x: x.weight or 0, reverse=True)
         if e.weight and e.weight >= 20 and e.explanation
     ][:5]
-
     return FraudAnalysis(
         overall_score=(
             float(latest_score.final_score) if latest_score.final_score else None
@@ -343,54 +322,59 @@ class ClaimService_:
     ) -> Claim:
         # Idempotency
         result = await db.execute(
-            select(Claim).filter(Claim.sha_claim_id == data.sha_claim_id)
+            select(Claim).filter(Claim.sha_claim_id == data.claim.sha_claim_id)
         )
         if result.scalars().first():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Claim '{data.sha_claim_id}' already ingested",
+                detail=f"Claim '{data.claim.sha_claim_id}' already ingested",
             )
-
         # Resolve provider
         p_res = await db.execute(
-            select(Provider).filter(Provider.sha_provider_code == data.provider_code)
+            select(Provider).filter(
+                Provider.sha_provider_code == data.provider.sha_provider_code
+            )
         )
         provider = p_res.scalars().first()
         if not provider:
-            provider = Provider(
-                sha_provider_code=data.provider_code,
-                name=f"Provider {data.provider_code}",
-            )
+            provider = Provider(**data.provider.model_dump())
             db.add(provider)
             await db.flush()
-
+        else:
+            # Update provider fields with latest data
+            for field, value in data.provider.model_dump(exclude_none=True).items():
+                setattr(provider, field, value)
+            await db.flush()
         # Resolve member
         m_res = await db.execute(
-            select(Member).filter(Member.sha_member_id == data.member_id_sha)
+            select(Member).filter(Member.sha_member_id == data.member.sha_member_id)
         )
         member = m_res.scalars().first()
         if not member:
-            member = Member(sha_member_id=data.member_id_sha)
+            member = Member(**data.member.model_dump())
             db.add(member)
             await db.flush()
-
+        else:
+            # Update member fields with latest data
+            for field, value in data.member.model_dump(exclude_none=True).items():
+                setattr(member, field, value)
+            await db.flush()
         claim = Claim(
-            sha_claim_id=data.sha_claim_id,
+            sha_claim_id=data.claim.sha_claim_id,
             provider_id=provider.id,
             member_id=member.id,
-            claim_type=data.claim_type,
-            sha_status=data.sha_status,
-            admission_date=data.admission_date,
-            discharge_date=data.discharge_date,
-            diagnosis_codes=data.diagnosis_codes or [],
-            total_claim_amount=data.total_claim_amount,
-            approved_amount=data.approved_amount,
-            submitted_at=data.submitted_at or datetime.now(UTC),
-            raw_payload=data.raw_payload or {},
+            claim_type=data.claim.claim_type,
+            sha_status=data.claim.sha_status,
+            admission_date=data.claim.admission_date,
+            discharge_date=data.claim.discharge_date,
+            diagnosis_codes=data.claim.diagnosis_codes or [],
+            total_claim_amount=data.claim.total_claim_amount,
+            approved_amount=data.claim.approved_amount,
+            submitted_at=data.claim.submitted_at or datetime.now(UTC),
+            raw_payload=data.claim.raw_payload or {},
         )
         db.add(claim)
         await db.flush()
-
         for svc in data.services:
             db.add(
                 ClaimService(
@@ -402,13 +386,9 @@ class ClaimService_:
                     total_price=svc.total_price,
                 )
             )
-
         await db.commit()
-
-        # Re-fetch with all relations for serialisation
         result = await db.execute(_load_claim().filter(Claim.id == claim.id))
         claim = result.scalars().first()
-
         await AuditService.log(
             db,
             AuditAction.CLAIM_INGESTED,
@@ -417,7 +397,7 @@ class ClaimService_:
             entity_id=claim.id,
             metadata={
                 "sha_claim_id": claim.sha_claim_id,
-                "provider_code": data.provider_code,
+                "provider_code": data.provider.sha_provider_code,
             },
         )
         return claim
@@ -453,7 +433,6 @@ class ClaimService_:
                 selectinload(Claim.fraud_scores),
             )
         )
-
         # Search — claim # OR provider name
         if filters.search:
             term = f"%{filters.search.strip()}%"
@@ -463,15 +442,12 @@ class ClaimService_:
                     Provider.name.ilike(term),
                 )
             )
-
         # Status filter
         if filters.sha_status:
             q = q.filter(Claim.sha_status == filters.sha_status)
-
         # County filter
         if filters.county:
             q = q.filter(Provider.county.ilike(f"%{filters.county.strip()}%"))
-
         # Risk level filter — subquery: latest scored_at per claim
         if filters.risk_level:
             latest_sq = (
@@ -493,7 +469,6 @@ class ClaimService_:
                 .subquery()
             )
             q = q.filter(Claim.id.in_(select(matching_ids_sq.c.claim_id)))
-
         # Advanced filters
         if filters.provider_id:
             q = q.filter(Claim.provider_id == filters.provider_id)
@@ -509,17 +484,14 @@ class ClaimService_:
             q = q.filter(Claim.total_claim_amount >= filters.min_amount)
         if filters.max_amount is not None:
             q = q.filter(Claim.total_claim_amount <= filters.max_amount)
-
         # Total count (on filtered query, not full table)
         count_result = await db.execute(select(count()).select_from(q.subquery()))
         total = count_result.scalar_one()
-
         # Paginated rows
         result = await db.execute(
             q.order_by(Claim.submitted_at.desc()).offset(offset).limit(limit)
         )
         claims = result.scalars().all()
-
         # Build ClaimListItem rows — pick latest fraud score per claim
         items: List[ClaimListItem] = []
         for claim in claims:
@@ -528,14 +500,11 @@ class ClaimService_:
                 if claim.fraud_scores
                 else None
             )
-
             raw_id = claim.member.sha_member_id if claim.member else None
             masked = f"****{raw_id[-4:]}" if raw_id and len(raw_id) >= 4 else raw_id
-
             service_date = _to_date(claim.admission_date) or _to_date(
                 claim.submitted_at
             )
-
             items.append(
                 ClaimListItem(
                     id=claim.id,
@@ -560,7 +529,6 @@ class ClaimService_:
                     status=claim.sha_status,
                 )
             )
-
         return items, total
 
     # ── Get single claim (raw ORM — for score/feature routes) ─────────────────
@@ -599,21 +567,16 @@ class ClaimService_:
         claim = result.scalars().first()
         if not claim:
             raise HTTPException(status_code=404, detail="Claim not found")
-
         latest_score = (
             sorted(claim.fraud_scores, key=lambda s: s.scored_at, reverse=True)[0]
             if claim.fraud_scores
             else None
         )
-
         # ── Header ────────────────────────────────────────────────────────────
-
         service_date = _to_date(claim.admission_date) or _to_date(claim.submitted_at)
-
         # ── Claim Information card ────────────────────────────────────────────
         raw_id = claim.member.sha_member_id if claim.member else None
         patient_masked = f"****{raw_id[-4:]}" if raw_id and len(raw_id) >= 4 else raw_id
-
         # Procedure: join service descriptions, fall back to service codes
         procedure_parts = [
             s.description or s.service_code or ""
@@ -621,13 +584,11 @@ class ClaimService_:
             if s.description or s.service_code
         ]
         procedure_str = ", ".join(filter(None, procedure_parts)) or None
-
         # Diagnosis: join ICD-10 codes as display string
         # In production: replace with a lookup table for human-readable names
         diagnosis_str = (
             ", ".join(claim.diagnosis_codes) if claim.diagnosis_codes else None
         )
-
         claim_info = ClaimInformation(
             patient_id_masked=patient_masked,
             provider_id_code=(
@@ -641,7 +602,6 @@ class ClaimService_:
             service_date_to=_to_date(claim.discharge_date),
             county=claim.provider.county if claim.provider else None,
         )
-
         return ClaimDetailResponse(
             id=claim.id,
             sha_claim_id=claim.sha_claim_id,
@@ -673,7 +633,6 @@ class ClaimService_:
         )
 
     # ── Update status ─────────────────────────────────────────────────────────
-
     @staticmethod
     async def update_claim_status(
         db: AsyncSession,
@@ -685,7 +644,6 @@ class ClaimService_:
         claim = result.scalars().first()
         if not claim:
             raise HTTPException(status_code=404, detail="Claim not found")
-
         old_status = claim.sha_status
         claim.sha_status = data.sha_status
         if data.approved_amount is not None:
@@ -693,11 +651,9 @@ class ClaimService_:
         if data.sha_status in (ClaimStatus.APPROVED, ClaimStatus.PAID):
             claim.processed_at = datetime.now(UTC)
         await db.commit()
-
         # Re-fetch with relations
         result = await db.execute(_load_claim().filter(Claim.id == claim_id))
         claim = result.scalars().first()
-
         await AuditService.log(
             db,
             AuditAction.CLAIM_STATUS_UPDATED,
