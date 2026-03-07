@@ -46,6 +46,7 @@ from app.detectors.upcoding_medical_db import (
 )
 from app.models.claim_feature_model import ClaimFeature
 from app.models.claim_model import Claim
+from app.utils.provider_utils import parse_facility_level
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +132,7 @@ class UpcodingDetector(BaseDetector):
         diagnosis_codes = list(claim.diagnosis_codes or [])
         service_codes = [(s.service_code or "").upper() for s in claim.services]
         provider = getattr(claim, "provider", None)
-        facility_level = int(getattr(provider, "facility_level", 4) or 4)
-
+        facility_level = parse_facility_level(provider)
         all_flags: List[str] = []
         all_metadata: Dict = {}
 

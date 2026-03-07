@@ -7,7 +7,7 @@ suspicious demographic data, or whose coverage is inactive / expired.
 Fraud pattern: providers fabricate patient records to bill for services never rendered.
 """
 
-from datetime import date
+from datetime import date, datetime
 from typing import Dict, Optional
 
 from app.detectors.base_detector import BaseDetector, DetectorResult
@@ -70,9 +70,22 @@ class PhantomPatientDetector(BaseDetector):
                 score += 30.0
                 flags.append(f"Impossible age calculated: {age} years")
             # Claim submitted before member was born
-            if claim.admission_date and claim.admission_date < member.date_of_birth:
+            admission = (
+                claim.admission_date.date()
+                if isinstance(claim.admission_date, datetime)
+                else claim.admission_date
+            )
+            dob = (
+                member.date_of_birth.date()
+                if isinstance(member.date_of_birth, datetime)
+                else member.date_of_birth
+            )
+            if admission and dob and admission < dob:
                 score += 40.0
                 flags.append("Admission date is before member's date of birth")
+            # if claim.admission_date and claim.admission_date < member.date_of_birth:
+            #     score += 40.0
+            #     flags.append("Admission date is before member's date of birth")
         score = min(score, 100.0)
         fired = score > 0
         explanation = (
