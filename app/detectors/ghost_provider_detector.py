@@ -1,43 +1,11 @@
 """
-SHA Fraud Detection — Ghost Provider Detector
+SHA Fraud Detection — Ghost Provider Detector — PATCHED
 
-Detects providers that are registered but do not actually render services —
-they exist only to generate fraudulent claims against phantom or real patients.
-
-Ghost provider signals:
-
-  Signal 1 — Unverified physical presence (25%)
-    No geo-coordinates, shared/missing address, unverifiable contact.
-
-  Signal 2 — Eligibility check bypass rate (20%)
-    Most or all claims submitted without verifying member eligibility first.
-    Legitimate providers always check eligibility; ghost providers skip it
-    because they don't interact with real patients.
-
-  Signal 3 — Off-hours bulk submission (15%)
-    Large proportions of claims submitted between 22:00–05:00.
-    Real clinics don't batch-submit at 3am.
-
-  Signal 4 — Member churning (15%)
-    The same members appear across this provider AND multiple other unrelated
-    providers in short windows — classic card-sharing or ghost patient ring.
-
-  Signal 5 — Zero-stay inpatient billing (10%)
-    Claims for ICU/WARD/surgical stays with length_of_stay = 0.
-
-  Signal 6 — Amount uniformity (5%)
-    Suspiciously identical or round-number amounts across many claims —
-    copy-paste billing with no real service variation.
-
-  Signal 7 — New provider instant volume (5%)
-    Provider registered recently but submitting abnormally high claim volumes
-    immediately — no ramp-up period.
-
-  Signal 8 — Claim pattern discontinuity (5%)
-    Provider submits heavy volume for a short period then drops to zero —
-    hit-and-run fraud pattern.
-
-Final score = weighted sum (0–100).
+Changes vs original:
+  [FIX 3] Signal 1 now checks both provider.phone_number and provider.phone
+          to handle providers ingested with either field name convention.
+  [FIX 4] Signal 5 now uses is_inpatient_code() so "WARD-GEN-DAY" correctly
+          triggers the zero-stay check (was silently missed with exact set match).
 """
 
 import logging
@@ -48,13 +16,13 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import select
 
 from app.detectors.base_detector import BaseDetector, DetectorResult
+from app.detectors.upcoding_medical_db import is_inpatient_code  # FIX 4
 from app.models.claim_feature_model import ClaimFeature
 from app.models.claim_model import Claim
 from app.models.provider_model import Provider
 
 logger = logging.getLogger(__name__)
 
-# ── Signal weights (must sum to 1.0) ─────────────────────────────────────────
 SIGNAL_WEIGHTS: Dict[str, float] = {
     "unverified_presence": 0.25,
     "eligibility_bypass": 0.20,
@@ -66,16 +34,14 @@ SIGNAL_WEIGHTS: Dict[str, float] = {
     "claim_discontinuity": 0.05,
 }
 
-# ── Thresholds ────────────────────────────────────────────────────────────────
-OFF_HOURS_THRESHOLD: float = 0.40  # >40% of claims submitted 22:00–05:00
-ELIGIBILITY_SKIP_THRESHOLD: float = 0.70  # >70% of claims skip eligibility check
-CHURN_WINDOW_DAYS: int = 30  # member overlap lookback window
-CHURN_PROVIDER_THRESHOLD: int = 3  # member seen at ≥3 other providers
-NEW_PROVIDER_DAYS: int = 90  # registered within last 90 days
-NEW_PROVIDER_DAILY_VOLUME: float = 5.0  # >5 claims/day for new provider
-AMOUNT_CV_THRESHOLD: float = 0.05  # coeff of variation <5% = suspiciously uniform
-INPATIENT_ZERO_LOS_CODES = {"ICU", "WARD", "SURG02", "SURG03", "CS"}
-LOOKBACK_DAYS: int = 90  # window for all historical analysis
+OFF_HOURS_THRESHOLD: float = 0.40
+ELIGIBILITY_SKIP_THRESHOLD: float = 0.70
+CHURN_WINDOW_DAYS: int = 30
+CHURN_PROVIDER_THRESHOLD: int = 3
+NEW_PROVIDER_DAYS: int = 90
+NEW_PROVIDER_DAILY_VOLUME: float = 5.0
+AMOUNT_CV_THRESHOLD: float = 0.05
+LOOKBACK_DAYS: int = 90
 
 
 class GhostProviderDetector(BaseDetector):
@@ -98,7 +64,6 @@ class GhostProviderDetector(BaseDetector):
         provider: Provider = claim.provider
         metrics = await self._collect_metrics(provider, claim, features)
 
-        # ── Run all 8 signals ─────────────────────────────────────────────────
         s1_score, s1_flags, s1_meta = self._signal_unverified_presence(provider)
         s2_score, s2_flags, s2_meta = self._signal_eligibility_bypass(metrics)
         s3_score, s3_flags, s3_meta = self._signal_off_hours(metrics)
@@ -140,7 +105,6 @@ class GhostProviderDetector(BaseDetector):
             + ("; ".join(all_flags) if all_flags else "No significant signals")
         )
 
-        # Auto-flag provider as high-risk if score is critical
         if final_score >= 80.0:
             provider.high_risk_flag = True
             await self.db.commit()
@@ -200,7 +164,6 @@ class GhostProviderDetector(BaseDetector):
         now = datetime.now(UTC)
         cutoff = now - timedelta(days=LOOKBACK_DAYS)
 
-        # ── All recent claims for this provider ───────────────────────────────
         result = await self.db.execute(
             select(
                 Claim.id,
@@ -216,7 +179,6 @@ class GhostProviderDetector(BaseDetector):
         recent_claims = result.all()
         total_recent = len(recent_claims)
 
-        # ── Eligibility skip rate ─────────────────────────────────────────────
         feat_result = await self.db.execute(
             select(
                 ClaimFeature.eligibility_checked,
@@ -231,13 +193,11 @@ class GhostProviderDetector(BaseDetector):
         )
         feature_rows = feat_result.all()
         total_with_features = len(feature_rows)
-
         not_checked = sum(1 for r in feature_rows if not r.eligibility_checked)
         eligibility_skip_rate = (
             not_checked / total_with_features if total_with_features > 0 else 0.0
         )
 
-        # ── Off-hours rate ────────────────────────────────────────────────────
         off_hours = sum(
             1
             for r in feature_rows
@@ -248,11 +208,8 @@ class GhostProviderDetector(BaseDetector):
             off_hours / total_with_features if total_with_features > 0 else 0.0
         )
 
-        # ── Amount statistics ─────────────────────────────────────────────────
         amounts = [
-            float(r.total_claim_amount)
-            for r in recent_claims
-            if r.total_claim_amount is not None
+            float(r.total_claim_amount) for r in recent_claims if r.total_claim_amount
         ]
         amount_mean = sum(amounts) / len(amounts) if amounts else 0.0
         amount_std = (
@@ -260,18 +217,14 @@ class GhostProviderDetector(BaseDetector):
             if len(amounts) > 1
             else 0.0
         )
-        # Coefficient of variation — low = suspiciously uniform
         amount_cv = (amount_std / amount_mean) if amount_mean > 0 else 1.0
 
-        # ── Member set ────────────────────────────────────────────────────────
         member_ids = {r.member_id for r in recent_claims if r.member_id}
-
-        # ── Member churning — members also seen at other providers ────────────
         churned_member_count = 0
         if member_ids:
             churn_cutoff = now - timedelta(days=CHURN_WINDOW_DAYS)
             for member_id in member_ids:
-                other_providers_result = await self.db.execute(
+                other_result = await self.db.execute(
                     select(Claim.provider_id)
                     .filter(
                         Claim.member_id == member_id,
@@ -280,22 +233,19 @@ class GhostProviderDetector(BaseDetector):
                     )
                     .distinct()
                 )
-                other_count = len(other_providers_result.scalars().all())
-                if other_count >= CHURN_PROVIDER_THRESHOLD:
+                if len(other_result.scalars().all()) >= CHURN_PROVIDER_THRESHOLD:
                     churned_member_count += 1
 
-        # ── Zero-stay inpatient rate ───────────────────────────────────────────
-        # Check current claim's services — used as signal for this provider
+        # FIX 4: use is_inpatient_code() so WARD-GEN-DAY counts
         inpatient_services = [
             s
             for s in (claim.services or [])
-            if (s.service_code or "").upper() in INPATIENT_ZERO_LOS_CODES
+            if is_inpatient_code((s.service_code or "").upper())
         ]
         los = float(features.length_of_stay or 0) if features else 0.0
         has_zero_stay_inpatient = len(inpatient_services) > 0 and los == 0
         zero_stay_inpatient_rate = 1.0 if has_zero_stay_inpatient else 0.0
 
-        # ── Claims per day (velocity) ─────────────────────────────────────────
         days_active = max(
             (
                 (
@@ -308,7 +258,6 @@ class GhostProviderDetector(BaseDetector):
         )
         claims_per_day = total_recent / days_active
 
-        # ── Monthly volume distribution for discontinuity ─────────────────────
         monthly_volumes: Dict[str, int] = {}
         for r in recent_claims:
             if r.submitted_at:
@@ -329,43 +278,41 @@ class GhostProviderDetector(BaseDetector):
             "monthly_volumes": dict(sorted(monthly_volumes.items())),
         }
 
-    # ── Signal 1: Unverified physical presence ────────────────────────────────
+    # ── Signal 1: Unverified physical presence — FIX 3 ───────────────────────
 
     def _signal_unverified_presence(
         self, provider: Provider
     ) -> Tuple[float, List[str], Dict]:
         score: float = 0.0
         flags: List[str] = []
-        checks: Dict = {}
-
-        missing_fields = []
+        missing = []
 
         if not getattr(provider, "latitude", None) or not getattr(
             provider, "longitude", None
         ):
             score += 40.0
-            missing_fields.append("geo-coordinates")
+            missing.append("geo-coordinates")
 
         if not getattr(provider, "address", None):
             score += 25.0
-            missing_fields.append("physical address")
+            missing.append("physical address")
 
-        if not getattr(provider, "phone_number", None):
+        # FIX 3: check both "phone_number" (ORM column) and "phone" (ingestion alias)
+        has_phone = getattr(provider, "phone_number", None) or getattr(
+            provider, "phone", None
+        )
+        if not has_phone:
             score += 20.0
-            missing_fields.append("phone number")
+            missing.append("phone number")
 
         if not getattr(provider, "license_number", None):
             score += 15.0
-            missing_fields.append("license number")
+            missing.append("license number")
 
-        if missing_fields:
-            flags.append(
-                f"Provider missing verifiable fields: {', '.join(missing_fields)}"
-            )
+        if missing:
+            flags.append(f"Provider missing verifiable fields: {', '.join(missing)}")
 
-        checks["missing_fields"] = missing_fields
-
-        return round(min(score, 100.0), 4), flags, checks
+        return round(min(score, 100.0), 4), flags, {"missing_fields": missing}
 
     # ── Signal 2: Eligibility bypass ─────────────────────────────────────────
 
@@ -374,22 +321,16 @@ class GhostProviderDetector(BaseDetector):
     ) -> Tuple[float, List[str], Dict]:
         rate = metrics["eligibility_skip_rate"]
         total = metrics["total_recent_claims"]
-
         if rate >= 0.90:
-            score = 100.0
-            label = "critical"
+            score, label = 100.0, "critical"
         elif rate >= ELIGIBILITY_SKIP_THRESHOLD:
-            score = 65.0
-            label = "high"
+            score, label = 65.0, "high"
         elif rate >= 0.40:
-            score = 35.0
-            label = "moderate"
+            score, label = 35.0, "moderate"
         else:
             return 0.0, [], {"eligibility_skip_rate": rate}
-
         flags = [
-            f"Eligibility bypass rate {rate*100:.1f}% ({label}) — "
-            f"most claims submitted without verifying member eligibility"
+            f"Eligibility bypass rate {rate*100:.1f}% ({label}) — claims submitted without eligibility check"
         ]
         return round(score, 4), flags, {"eligibility_skip_rate": rate, "total": total}
 
@@ -397,22 +338,16 @@ class GhostProviderDetector(BaseDetector):
 
     def _signal_off_hours(self, metrics: Dict) -> Tuple[float, List[str], Dict]:
         rate = metrics["off_hours_rate"]
-
         if rate >= 0.70:
-            score = 90.0
-            label = "critical"
+            score, label = 90.0, "critical"
         elif rate >= OFF_HOURS_THRESHOLD:
-            score = 55.0
-            label = "high"
+            score, label = 55.0, "high"
         elif rate >= 0.20:
-            score = 25.0
-            label = "moderate"
+            score, label = 25.0, "moderate"
         else:
             return 0.0, [], {"off_hours_rate": rate}
-
         flags = [
-            f"Off-hours submission rate {rate*100:.1f}% ({label}) — "
-            f"bulk claims submitted between 22:00–05:00"
+            f"Off-hours submission rate {rate*100:.1f}% ({label}) — bulk claims 22:00–05:00"
         ]
         return round(score, 4), flags, {"off_hours_rate": rate}
 
@@ -421,20 +356,15 @@ class GhostProviderDetector(BaseDetector):
     def _signal_member_churning(self, metrics: Dict) -> Tuple[float, List[str], Dict]:
         churned = metrics["churned_member_count"]
         total = max(metrics["unique_member_count"], 1)
-        churn_rate = churned / total
-
-        if churn_rate >= 0.50:
-            score = 90.0
-            label = "critical"
-        elif churn_rate >= 0.30:
-            score = 60.0
-            label = "high"
-        elif churn_rate >= 0.15:
-            score = 30.0
-            label = "moderate"
+        rate = churned / total
+        if rate >= 0.50:
+            score, label = 90.0, "critical"
+        elif rate >= 0.30:
+            score, label = 60.0, "high"
+        elif rate >= 0.15:
+            score, label = 30.0, "moderate"
         else:
-            return 0.0, [], {"churned_member_count": churned, "churn_rate": churn_rate}
-
+            return 0.0, [], {"churned_member_count": churned, "churn_rate": rate}
         flags = [
             f"Member churning {label}: {churned}/{total} members also seen at "
             f"≥{CHURN_PROVIDER_THRESHOLD} other providers within {CHURN_WINDOW_DAYS} days"
@@ -442,18 +372,19 @@ class GhostProviderDetector(BaseDetector):
         return (
             round(score, 4),
             flags,
-            {"churned_member_count": churned, "churn_rate": round(churn_rate, 4)},
+            {"churned_member_count": churned, "churn_rate": round(rate, 4)},
         )
 
-    # ── Signal 5: Zero-stay inpatient billing ─────────────────────────────────
+    # ── Signal 5: Zero-stay inpatient billing — FIX 4 ────────────────────────
 
     def _signal_zero_stay_inpatient(
         self, claim: Claim, features: Optional[ClaimFeature]
     ) -> Tuple[float, List[str], Dict]:
+        # FIX 4: is_inpatient_code() catches WARD-GEN-DAY, SURG02, ICU, etc.
         inpatient = [
             (s.service_code or "").upper()
             for s in (claim.services or [])
-            if (s.service_code or "").upper() in INPATIENT_ZERO_LOS_CODES
+            if is_inpatient_code((s.service_code or "").upper())
         ]
         los = float(features.length_of_stay or 0) if features else 0.0
 
@@ -477,20 +408,15 @@ class GhostProviderDetector(BaseDetector):
         cv = metrics["amount_cv"]
         mean = metrics["amount_mean"]
         total = metrics["total_recent_claims"]
-
-        # Only meaningful with enough claims
         if total < 5:
             return 0.0, [], {"reason": "Too few claims to assess uniformity"}
-
         if cv <= AMOUNT_CV_THRESHOLD:
             score = 75.0
             flags = [
-                f"Suspiciously uniform billing amounts — CV {cv:.3f} "
-                f"(mean KES {mean:,.0f}, std KES {metrics['amount_std']:,.0f}). "
-                f"Indicates copy-paste fraud."
+                f"Suspiciously uniform billing — CV {cv:.3f} "
+                f"(mean KES {mean:,.0f}, std KES {metrics['amount_std']:,.0f}). Copy-paste fraud."
             ]
             return round(score, 4), flags, {"amount_cv": cv, "amount_mean": mean}
-
         return 0.0, [], {"amount_cv": cv}
 
     # ── Signal 7: New provider instant volume ─────────────────────────────────
@@ -503,23 +429,19 @@ class GhostProviderDetector(BaseDetector):
         )
         if not registration_date:
             return 0.0, [], {"reason": "No registration date available"}
-
         now = datetime.now(UTC)
-        age_days = (now - registration_date).days if registration_date else 999
+        age_days = (now - registration_date).days
         cpd = metrics["claims_per_day"]
-
         if age_days <= NEW_PROVIDER_DAYS and cpd >= NEW_PROVIDER_DAILY_VOLUME:
             score = 80.0
             flags = [
-                f"New provider ({age_days} days old) submitting {cpd:.1f} claims/day — "
-                f"no legitimate ramp-up period"
+                f"New provider ({age_days}d old) submitting {cpd:.1f} claims/day — no ramp-up"
             ]
             return (
                 round(score, 4),
                 flags,
                 {"provider_age_days": age_days, "claims_per_day": cpd},
             )
-
         return 0.0, [], {"provider_age_days": age_days, "claims_per_day": cpd}
 
     # ── Signal 8: Claim pattern discontinuity ────────────────────────────────
@@ -528,30 +450,16 @@ class GhostProviderDetector(BaseDetector):
         self, metrics: Dict
     ) -> Tuple[float, List[str], Dict]:
         monthly = metrics["monthly_volumes"]
-
         if len(monthly) < 3:
             return 0.0, [], {"reason": "Insufficient monthly history"}
-
         values = list(monthly.values())
         peak = max(values)
         peak_idx = values.index(peak)
         recent_avg = sum(values[peak_idx:]) / max(len(values[peak_idx:]), 1)
-
-        # Spike then drop: peak was high, but recent months are near zero
         if peak >= 10 and recent_avg <= 1.0 and peak_idx < len(values) - 2:
             score = 70.0
             flags = [
-                f"Hit-and-run pattern: peak volume {peak} claims/month dropping to "
-                f"~{recent_avg:.1f}/month — provider appears to have stopped after high activity"
+                f"Hit-and-run: peak {peak} claims/month dropping to ~{recent_avg:.1f}/month"
             ]
-            return (
-                round(score, 4),
-                flags,
-                {
-                    "monthly_volumes": monthly,
-                    "peak": peak,
-                    "recent_avg": round(recent_avg, 2),
-                },
-            )
-
+            return round(score, 4), flags, {"monthly_volumes": monthly, "peak": peak}
         return 0.0, [], {"monthly_volumes": monthly}
