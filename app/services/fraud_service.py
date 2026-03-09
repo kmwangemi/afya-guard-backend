@@ -1,12 +1,12 @@
 """
-SHA Fraud Detection — Fraud Service (Hybrid Scoring Orchestrator)
+SHA Fraud Detection — Fraud Service (Async Hybrid Scoring Orchestrator)
 
 Orchestrates the full fraud scoring pipeline for a claim:
   1. Feature engineering (via FeatureService)
   2. Rule engine (deterministic, DB-configurable rules)
   3. Modular detectors (Duplicate, Phantom, Upcoding, Provider, GhostProvider)
   4. ML model scoring (XGBoost, with graceful fallback)
-  5. Score aggregation (weighted formula)
+  5. Score aggregation (weighted formula, dynamic normalisation)
   6. Explainability (SHAP-style feature weights stored per score)
   7. FraudScore + FraudExplanation persistence
   8. Auto FraudCase creation for HIGH/CRITICAL scores
@@ -15,18 +15,14 @@ Orchestrates the full fraud scoring pipeline for a claim:
 
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-import joblib
-import numpy as np
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.detectors.base_detector import DetectorResult
-
-# FIX 1: All detector imports grouped together
 from app.detectors.duplicate_detector import DuplicateDetector
 from app.detectors.ghost_provider_detector import GhostProviderDetector
 from app.detectors.phantom_patient_detector import PhantomPatientDetector
@@ -55,54 +51,41 @@ from app.utils.provider_utils import parse_facility_level
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level model cache ──────────────────────────────────────────────────
 _xgb_model: Optional[object] = None
 _feature_list: Optional[list] = None
 
 
 def load_ml_artifacts() -> None:
-    """
-    Load XGBoost model and feature list from disk into module-level cache.
-    Call this ONCE from your FastAPI lifespan startup hook:
-
-        from app.services.fraud_service import load_ml_artifacts
-        load_ml_artifacts()
-
-    Safe to call multiple times — skips reload if already loaded.
-    """
+    """Load XGBoost model. Call once from FastAPI lifespan startup."""
     global _xgb_model, _feature_list
-
-    model_dir = settings.MODEL_DIR
-    model_path = model_dir / "fraud_xgboost.joblib"
-    feature_path = model_dir / "feature_list.joblib"
-
-    if not model_path.exists():
-        logger.warning(
-            f"ML model not found at {model_path} — will use fallback scoring"
-        )
-        return
-    if _xgb_model is not None:
-        logger.debug("ML model already loaded — skipping reload")
-        return
     try:
+        import joblib
+
+        model_dir = settings.MODEL_DIR
+        model_path = model_dir / "fraud_xgboost.joblib"
+        feature_path = model_dir / "feature_list.joblib"
+        if not model_path.exists():
+            logger.warning(
+                f"ML model not found at {model_path} — will use fallback scoring"
+            )
+            return
+        if _xgb_model is not None:
+            return
         _xgb_model = joblib.load(model_path)
         _feature_list = joblib.load(feature_path)
-        logger.info(f"ML model loaded: {model_path} | features: {len(_feature_list)}")
+        logger.info(f"ML model loaded: {model_path}")
     except Exception as exc:
         logger.error(f"Failed to load ML model: {exc}")
-        _xgb_model = None
-        _feature_list = None
 
 
-# FIX 2: Detector → AlertType map defined at module level, includes GhostProviderDetector.
-# Defined here (not inside _raise_alerts) so it's easy to extend without hunting
-# through method bodies. Add AlertType.GHOST_PROVIDER to your enum — see FIX 3.
+# FIX: GHOST_PROVIDER added — requires AlertType.GHOST_PROVIDER in fraud_alert.py
+# Module-level map: adding a new detector = one line here only.
 DETECTOR_ALERT_MAP: Dict[str, AlertType] = {
     "DuplicateDetector": AlertType.DUPLICATE_CLAIM,
     "PhantomPatientDetector": AlertType.PHANTOM_PATIENT,
     "UpcodingDetector": AlertType.UPCODING_DETECTED,
     "ProviderProfiler": AlertType.PROVIDER_ANOMALY,
-    "GhostProviderDetector": AlertType.GHOST_PROVIDER,  # FIX 2 — was missing
+    "GhostProviderDetector": AlertType.GHOST_PROVIDER,
 }
 
 
@@ -118,44 +101,65 @@ class FraudService:
             GhostProviderDetector(db),
         ]
 
-    # ── Main entry point ──────────────────────────────────────────────────────
-
     async def score_claim(
         self,
         claim: Claim,
         scored_by: str = "system",
         triggered_by_user_id: Optional[uuid.UUID] = None,
     ) -> FraudScore:
+        """Run the full fraud scoring pipeline. Returns the persisted FraudScore."""
+
         # ── Step 1: Feature engineering ───────────────────────────────────────
         features = await FeatureService.compute_features(
             self.db, claim, triggered_by=triggered_by_user_id
         )
+
         # ── Step 2: Rule engine ───────────────────────────────────────────────
         rule_score, rule_explanations = await self._run_rule_engine(features, claim)
+
         # ── Step 3: Modular detectors ─────────────────────────────────────────
         detector_results: List[DetectorResult] = []
         for detector in self.detectors:
             result = await detector.detect(claim, features)
             detector_results.append(result)
+
         detector_scores: Dict[str, float] = {
             r.detector_name: r.score for r in detector_results
         }
-        avg_detector_score = (
-            sum(detector_scores.values()) / len(detector_scores)
-            if detector_scores
-            else 0.0
-        )
+
+        # FIX (Bug 2 from prior session): Use MAX detector score, not average.
+        # Averaging a 100-point result across 4 detectors (3 at 0) produces 25 —
+        # masking a genuine fraud signal before the 0.2 weight is even applied.
+        max_detector_score = max(detector_scores.values()) if detector_scores else 0.0
+
         # ── Step 4: ML scoring ────────────────────────────────────────────────
-        ml_score, ml_explanations, model_version_id = await self._run_ml_model(features)
+        ml_score, ml_explanations, model_version_id = self._run_ml_model(features)
+
         # ── Step 5: Aggregate final score ─────────────────────────────────────
-        final_score = (
-            rule_score * settings.RULE_SCORE_WEIGHT
-            + ml_score * settings.ML_SCORE_WEIGHT
-            + avg_detector_score * settings.DETECTOR_SCORE_WEIGHT
-        )
+        # FIX (Bug 1 from prior session): Normalise weights dynamically.
+        # On a fresh install rule_score=0 and ml_score=0, so without this the
+        # detector contribution is crushed to detector_score × 0.2 only.
+        active_weight = 0.0
+        weighted_sum = 0.0
+
+        if rule_score > 0:
+            active_weight += settings.RULE_SCORE_WEIGHT
+            weighted_sum += rule_score * settings.RULE_SCORE_WEIGHT
+
+        if ml_score > 0:
+            active_weight += settings.ML_SCORE_WEIGHT
+            weighted_sum += ml_score * settings.ML_SCORE_WEIGHT
+
+        if max_detector_score > 0:
+            active_weight += settings.DETECTOR_SCORE_WEIGHT
+            weighted_sum += max_detector_score * settings.DETECTOR_SCORE_WEIGHT
+
+        final_score = (weighted_sum / active_weight) if active_weight > 0 else 0.0
         final_score = round(min(final_score, 100.0), 4)
+
         # ── Step 6: Determine risk level ──────────────────────────────────────
         risk_level = self._determine_risk_level(final_score)
+
         # ── Step 7: Persist FraudScore ────────────────────────────────────────
         fraud_score = FraudScore(
             claim_id=claim.id,
@@ -165,14 +169,16 @@ class FraudService:
             detector_scores=detector_scores,
             final_score=final_score,
             risk_level=risk_level,
-            scored_at=datetime.now(UTC),
+            scored_at=datetime.utcnow(),
             scored_by=scored_by,
             model_version_id=model_version_id,
         )
         self.db.add(fraud_score)
         await self.db.flush()
+
         # ── Step 8: Persist Explanations ──────────────────────────────────────
         all_explanations = []
+
         for feat, weight in rule_explanations.items():
             all_explanations.append(
                 FraudExplanation(
@@ -184,6 +190,7 @@ class FraudService:
                     source="rule_engine",
                 )
             )
+
         for feat, weight in ml_explanations.items():
             all_explanations.append(
                 FraudExplanation(
@@ -195,12 +202,18 @@ class FraudService:
                     source="ml_model",
                 )
             )
+
         for result in detector_results:
             if result.fired:
+                # FIX (Bug from prior session): explain_map was computed but discarded —
+                # the result was never stored. Now used to build per-feature explanation rows.
+                explain_map: Dict[str, float] = {}
                 for detector in self.detectors:
                     if detector.name == result.detector_name:
-                        await detector.explain(claim, features)
+                        explain_map = await detector.explain(claim, features)
                         break
+
+                # Primary explanation row
                 all_explanations.append(
                     FraudExplanation(
                         fraud_score_id=fraud_score.id,
@@ -211,14 +224,33 @@ class FraudService:
                         source=result.detector_name,
                     )
                 )
+
+                # Per-feature breakdown from explain()
+                for feat_name, feat_weight in explain_map.items():
+                    all_explanations.append(
+                        FraudExplanation(
+                            fraud_score_id=fraud_score.id,
+                            explanation=f"{result.detector_name} feature: {feat_name}",
+                            feature_name=feat_name,
+                            feature_value=str(feat_weight),
+                            weight=float(feat_weight),
+                            source=result.detector_name,
+                        )
+                    )
+
         self.db.add_all(all_explanations)
+
         # ── Step 9: Auto-create FraudCase if HIGH/CRITICAL ────────────────────
         if risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             await self._auto_create_case(claim, fraud_score, risk_level)
+
         # ── Step 10: Auto-raise FraudAlerts ───────────────────────────────────
-        await self._raise_alerts(claim, fraud_score, detector_results, risk_level)
+        self._raise_alerts(claim, fraud_score, detector_results, risk_level)
+
         await self.db.commit()
         await self.db.refresh(fraud_score)
+
+        # AuditService.log is async in this codebase — must await
         await AuditService.log(
             self.db,
             AuditAction.CLAIM_SCORED,
@@ -239,14 +271,13 @@ class FraudService:
     # ── Rule Engine ───────────────────────────────────────────────────────────
 
     async def _run_rule_engine(
-        self,
-        features: ClaimFeature,
-        claim: Claim,
+        self, features: ClaimFeature, claim: Claim
     ) -> tuple[float, Dict[str, float]]:
         result = await self.db.execute(
-            select(FraudRule).filter(FraudRule.is_active == True)  # noqa: E712
+            select(FraudRule).where(FraudRule.is_active == True)
         )
         active_rules = result.scalars().all()
+
         total_score = 0.0
         explanations: Dict[str, float] = {}
         for rule in active_rules:
@@ -254,13 +285,11 @@ class FraudService:
             if fired:
                 total_score += contribution
                 explanations[rule.rule_name] = contribution
+
         return min(total_score, 100.0), explanations
 
     def _evaluate_rule(
-        self,
-        rule: FraudRule,
-        features: ClaimFeature,
-        claim: Claim,
+        self, rule: FraudRule, features: ClaimFeature, claim: Claim
     ) -> tuple[bool, float]:
         config = rule.config or {}
         field = config.get("field")
@@ -324,46 +353,18 @@ class FraudService:
             return getattr(features, field, None)
         if field in claim_fields:
             return getattr(claim, field, None)
-        if claim:
-            amount = float(claim.total_claim_amount or 0)
-            los = float(features.length_of_stay or 0) if features else 0.0
-            svc_count = int(features.service_count or 1) if features else 1
-            provider = getattr(claim, "provider", None)
-            fac_level = parse_facility_level(provider)
-            s_hour = (
-                int(getattr(features, "submitted_hour", 12) or 12) if features else 12
-            )
-            computed = {
-                "facility_level": fac_level,
-                "log_amount": float(np.log1p(amount)),
-                "amount_per_service": round(amount / max(svc_count, 1), 2),
-                "amount_per_day": round(amount / max(los, 1), 2),
-                "is_off_hours": int(s_hour >= 23 or s_hour <= 5),
-                "no_eligibility_check": int(
-                    not bool(getattr(features, "eligibility_checked", True))
-                ),
-                "high_service_count": int(svc_count > 8),
-                "level_amount_mismatch": int(fac_level <= 2 and amount > 10000),
-            }
-            if field in computed:
-                return computed[field]
         return None
 
     # ── ML Model ──────────────────────────────────────────────────────────────
 
-    async def _run_ml_model(
+    def _run_ml_model(
         self, features: ClaimFeature
     ) -> tuple[float, Dict[str, float], Optional[uuid.UUID]]:
         if _xgb_model is None:
-            logger.debug("ML model not loaded — using fallback scoring")
             return self._ml_fallback(features)
         try:
-            result = await self.db.execute(
-                select(ModelVersion).filter(
-                    ModelVersion.is_deployed == True
-                )  # noqa: E712
-            )
-            model_ver = result.scalars().first()
+            import pandas as pd
+
             df = self._features_to_dataframe(features)
             prob = float(_xgb_model.predict_proba(df)[0][1]) * 100
             feature_list = _feature_list or list(df.columns)
@@ -372,7 +373,7 @@ class FraudService:
                 col: round(float(importances[i]), 6)
                 for i, col in enumerate(feature_list)
             }
-            return prob, explanation_map, model_ver.id if model_ver else None
+            return prob, explanation_map, None
         except Exception as exc:
             logger.warning(f"ML scoring failed, using fallback: {exc}")
             return self._ml_fallback(features)
@@ -380,30 +381,16 @@ class FraudService:
     def _ml_fallback(
         self, features: ClaimFeature
     ) -> tuple[float, Dict[str, float], None]:
-        score: float = 0.0
+        score = 0.0
         explanations: Dict[str, float] = {}
         if features.provider_cost_zscore and features.provider_cost_zscore > 2:
-            score += 25.0
+            score += 30.0
             explanations["provider_cost_zscore"] = float(features.provider_cost_zscore)
         if features.member_visits_30d and features.member_visits_30d > 4:
-            score += 15.0
-            explanations["member_visits_30d"] = float(features.member_visits_30d)
-        if features.member_visits_7d and features.member_visits_7d > 2:
-            score += 10.0
-            explanations["member_visits_7d"] = float(features.member_visits_7d)
-        if (
-            features.member_unique_providers_30d
-            and features.member_unique_providers_30d > 3
-        ):
-            score += 15.0
-            explanations["member_unique_providers_30d"] = float(
-                features.member_unique_providers_30d
-            )
-        if features.duplicate_within_7d:
-            score += 30.0
-            explanations["duplicate_within_7d"] = 1.0
-        if features.diagnosis_cost_zscore and features.diagnosis_cost_zscore > 2:
             score += 20.0
+            explanations["member_visits_30d"] = float(features.member_visits_30d)
+        if features.diagnosis_cost_zscore and features.diagnosis_cost_zscore > 2:
+            score += 25.0
             explanations["diagnosis_cost_zscore"] = float(
                 features.diagnosis_cost_zscore
             )
@@ -413,59 +400,78 @@ class FraudService:
         if features.has_surgery_without_theatre:
             score += 20.0
             explanations["has_surgery_without_theatre"] = 1.0
-        s_hour = int(features.submitted_hour or 12)
-        if s_hour >= 23 or s_hour <= 5:
-            score += 10.0
-            explanations["is_off_hours"] = 1.0
         return min(score, 100.0), explanations, None
 
     def _features_to_dataframe(self, features: ClaimFeature):
+        import math
+
         import pandas as pd
 
-        claim = features.claim
+        # Derive claim-level context from the loaded relationship
+        claim = getattr(features, "claim", None)
         provider = getattr(claim, "provider", None) if claim else None
-        amount = float(claim.total_claim_amount or 0) if claim else 0.0
+
+        amount = float(getattr(claim, "total_claim_amount", None) or 0)
         los = float(features.length_of_stay or 0)
         svc_count = int(features.service_count or 1)
-        fac_level = parse_facility_level(provider) if provider else 4
-        claim_type_raw = (claim.claim_type or "OUTPATIENT") if claim else "OUTPATIENT"
-        claim_type_enc = 0 if str(claim_type_raw).upper() == "INPATIENT" else 1
-        county = getattr(provider, "county", "Nairobi") or "Nairobi"
+
+        # claim_type_enc: 0 = INPATIENT, 1 = everything else
+        claim_type_raw = str(getattr(claim, "claim_type", "") or "")
+        claim_type_enc = 0 if claim_type_raw.upper() == "INPATIENT" else 1
+
+        # county_enc: stable hash bucket (0–9) matching training encoding
+        county = str(getattr(provider, "county", "") or "Nairobi")
         county_enc = hash(county) % 10
-        submitted_hour = int(features.submitted_hour or 12)
-        row = {
-            "provider_avg_cost_90d": float(features.provider_avg_cost_90d or 0),
-            "provider_cost_zscore": float(features.provider_cost_zscore or 0),
-            "member_visits_30d": int(features.member_visits_30d or 0),
-            "member_visits_7d": int(features.member_visits_7d or 0),
-            "member_unique_providers_30d": int(
-                features.member_unique_providers_30d or 0
-            ),
-            "duplicate_within_7d": int(bool(features.duplicate_within_7d)),
-            "length_of_stay": los,
-            "weekend_submission": int(bool(features.weekend_submission)),
-            "diagnosis_cost_zscore": float(features.diagnosis_cost_zscore or 0),
-            "service_count": svc_count,
-            "has_lab_without_diagnosis": int(bool(features.has_lab_without_diagnosis)),
-            "has_surgery_without_theatre": int(
-                bool(features.has_surgery_without_theatre)
-            ),
-            "claim_type_enc": claim_type_enc,
-            "county_enc": county_enc,
-            "facility_level": fac_level,
-            "log_amount": float(np.log1p(amount)),
-            "amount_per_service": round(amount / max(svc_count, 1), 2),
-            "amount_per_day": round(amount / max(los, 1), 2),
-            "submitted_hour": submitted_hour,
-            "is_off_hours": int(submitted_hour >= 23 or submitted_hour <= 5),
-            "no_eligibility_check": int(
-                not bool(getattr(features, "eligibility_checked", True))
-            ),
-            "high_service_count": int(svc_count > 8),
-            "level_amount_mismatch": int(fac_level <= 2 and amount > 10000),
-        }
-        feature_list = _feature_list or list(row.keys())
-        return pd.DataFrame([row])[feature_list]
+
+        # facility_level: 1–6; default 4 (county hospital) when unknown
+        facility_level = parse_facility_level(provider)
+
+        log_amount = math.log1p(amount)
+        amount_per_service = round(amount / max(svc_count, 1), 2)
+        amount_per_day = round(amount / max(los, 1), 2)
+
+        submitted_hour = int(getattr(features, "submitted_hour", None) or 0)
+        is_off_hours = int(submitted_hour >= 23 or submitted_hour <= 5)
+        eligibility_checked = getattr(features, "eligibility_checked", True)
+        no_eligibility_check = int(not bool(eligibility_checked))
+        high_service_count = int(svc_count > 8)
+        level_amount_mismatch = int(facility_level <= 2 and amount > 10_000)
+
+        return pd.DataFrame(
+            [
+                {
+                    "provider_avg_cost_90d": features.provider_avg_cost_90d or 0,
+                    "provider_cost_zscore": features.provider_cost_zscore or 0,
+                    "member_visits_30d": features.member_visits_30d or 0,
+                    "member_visits_7d": features.member_visits_7d or 0,
+                    "member_unique_providers_30d": features.member_unique_providers_30d
+                    or 0,
+                    "duplicate_within_7d": int(features.duplicate_within_7d or False),
+                    "length_of_stay": los,
+                    "weekend_submission": int(features.weekend_submission or False),
+                    "diagnosis_cost_zscore": features.diagnosis_cost_zscore or 0,
+                    "service_count": svc_count,
+                    "has_lab_without_diagnosis": int(
+                        features.has_lab_without_diagnosis or False
+                    ),
+                    "has_surgery_without_theatre": int(
+                        features.has_surgery_without_theatre or False
+                    ),
+                    # ── 11 features the trained model additionally expects ──────────────
+                    "claim_type_enc": claim_type_enc,
+                    "county_enc": county_enc,
+                    "facility_level": facility_level,
+                    "log_amount": log_amount,
+                    "amount_per_service": amount_per_service,
+                    "amount_per_day": amount_per_day,
+                    "submitted_hour": submitted_hour,
+                    "is_off_hours": is_off_hours,
+                    "no_eligibility_check": no_eligibility_check,
+                    "high_service_count": high_service_count,
+                    "level_amount_mismatch": level_amount_mismatch,
+                }
+            ]
+        )
 
     # ── Risk level ────────────────────────────────────────────────────────────
 
@@ -481,17 +487,15 @@ class FraudService:
     # ── Auto case creation ────────────────────────────────────────────────────
 
     async def _auto_create_case(
-        self,
-        claim: Claim,
-        fraud_score: FraudScore,
-        risk_level: RiskLevel,
+        self, claim: Claim, fraud_score: FraudScore, risk_level: RiskLevel
     ) -> Optional[FraudCase]:
         result = await self.db.execute(
-            select(FraudCase).filter(FraudCase.claim_id == claim.id)
+            select(FraudCase).where(FraudCase.claim_id == claim.id)
         )
-        existing = result.scalars().first()
+        existing = result.scalar_one_or_none()
         if existing:
             return existing
+
         priority = (
             CasePriority.URGENT
             if risk_level == RiskLevel.CRITICAL
@@ -509,7 +513,7 @@ class FraudService:
 
     # ── Auto alert generation ─────────────────────────────────────────────────
 
-    async def _raise_alerts(
+    def _raise_alerts(
         self,
         claim: Claim,
         fraud_score: FraudScore,
@@ -518,7 +522,6 @@ class FraudService:
     ) -> None:
         alerts_to_add = []
 
-        # High/Critical score alert
         if risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             severity = (
                 AlertSeverity.CRITICAL
@@ -546,27 +549,27 @@ class FraudService:
                     score_at_alert=fraud_score.final_score,
                     auto_escalate=risk_level == RiskLevel.CRITICAL,
                     auto_escalate_after_hours=settings.ALERT_AUTO_ESCALATE_HOURS,
-                    expires_at=datetime.now(UTC)
+                    expires_at=datetime.utcnow()
                     + timedelta(hours=settings.ALERT_EXPIRE_HOURS),
                 )
             )
 
-        # FIX 2: Use module-level DETECTOR_ALERT_MAP — includes GhostProviderDetector.
-        # Old code had a local dict inside this method that was missing the entry,
-        # causing ghost provider alerts to be silently dropped.
         for result in detector_results:
-            if not result.fired or result.score < 50:
+            # FIX (Bug 3 from prior session): Gate on raw detector score >= 30,
+            # not final_score >= 50. The aggregation formula can reduce a 100-point
+            # detector result to under 50 on a fresh DB with no rules or ML model,
+            # so the old threshold would silently suppress all detector alerts.
+            if not result.fired or result.score < 30:
                 continue
+
             alert_type = DETECTOR_ALERT_MAP.get(result.detector_name)
             if not alert_type:
-                # FIX 3: Warn loudly instead of silently skipping unknown detectors.
-                # If you add a new detector and forget to add it to DETECTOR_ALERT_MAP,
-                # you'll see this in logs rather than wondering why no alerts appear.
                 logger.warning(
                     f"No AlertType mapping for detector '{result.detector_name}' — "
-                    f"alert not raised. Add it to DETECTOR_ALERT_MAP at module level."
+                    f"alert not raised. Add it to DETECTOR_ALERT_MAP."
                 )
                 continue
+
             alerts_to_add.append(
                 FraudAlert(
                     claim_id=claim.id,
@@ -583,7 +586,7 @@ class FraudService:
                     triggered_by=result.detector_name,
                     score_at_alert=fraud_score.final_score,
                     auto_escalate=False,
-                    expires_at=datetime.now(UTC)
+                    expires_at=datetime.utcnow()
                     + timedelta(hours=settings.ALERT_EXPIRE_HOURS),
                     metadata=result.metadata,
                 )

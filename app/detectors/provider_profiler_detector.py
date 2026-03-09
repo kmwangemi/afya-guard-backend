@@ -36,7 +36,8 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import distinct, select
+from sqlalchemy.sql.functions import count
 
 from app.detectors.base_detector import BaseDetector, DetectorResult
 from app.models.claim_feature_model import ClaimFeature
@@ -283,7 +284,18 @@ class ProviderProfiler(BaseDetector):
             if peer_avg and len(peer_amounts) > 1
             else None
         )
-        peer_provider_count = len(set(peer_amounts))  # proxy — unique amounts
+        # peer_provider_count = len(set(peer_amounts))  # proxy — unique amounts
+        peer_count_result = await self.db.execute(
+            select(count(distinct(Claim.provider_id)))
+            .join(Provider, Claim.provider_id == Provider.id)
+            .filter(
+                Provider.id != provider.id,
+                Provider.facility_type == provider.facility_type,
+                Provider.county == provider.county,
+                Claim.total_claim_amount.isnot(None),
+            )
+        )
+        peer_provider_count = peer_count_result.scalar() or 0
 
         # ── Peer z-score ──────────────────────────────────────────────────────
         peer_zscore = None

@@ -68,8 +68,8 @@ def _alert_number(alert: FraudAlert) -> str:
     zero-padded to 5 digits. Replace with a real sequence column if needed.
     """
     # Try to get a stored number from metadata first
-    if alert.metadata and alert.metadata.get("alert_number"):
-        return str(alert.metadata["alert_number"])
+    if alert.fraud_alert_metadata and alert.fraud_alert_metadata.get("alert_number"):
+        return str(alert.fraud_alert_metadata["alert_number"])
     # Derive a stable display number from UUID
     short = int(str(alert.id).replace("-", "")[:8], 16) % 100000
     return f"ALERT-{short:05d}"
@@ -239,7 +239,7 @@ def _build_detail(alert: FraudAlert) -> AlertDetailResponse:
         severity=alert.severity,
         status=alert.status,
         fraud_case_id=alert.fraud_case_id,
-        metadata=alert.metadata,
+        metadata=alert.fraud_alert_metadata,
     )
 
 
