@@ -51,14 +51,9 @@ PERMISSIONS: dict[str, tuple[str, str]] = {
 # Format: { "name": ("display_name", "description", is_system_role) }
 
 ROLES: dict[str, tuple[str, str, bool]] = {
-    "fraud_analyst": (
-        "Fraud Analyst",
-        "Reviews flagged claims, creates and works on investigation cases",
-        True,
-    ),
-    "senior_analyst": (
-        "Senior Analyst",
-        "All analyst capabilities plus case approval, assignment, and alert resolution",
+    "investigator": (
+        "Investigator",
+        "Reviews flagged claims, creates and works on investigation cases, assigns cases, and resolves alerts",
         True,
     ),
     "admin": (
@@ -76,26 +71,13 @@ ROLES: dict[str, tuple[str, str, bool]] = {
         "Read-only access to audit logs and analytics for compliance review",
         True,
     ),
-    "sha_integration": (
-        "SHA Integration",
-        "System service account for SHA webhook ingestion and auto-scoring",
-        True,
-    ),
 }
 
 
 # ── Role → Permission Mapping ─────────────────────────────────────────────────
 
 ROLE_PERMISSION_MAP: dict[str, list[str]] = {
-    "fraud_analyst": [
-        "view_claim",
-        "view_score",
-        "view_features",
-        "create_case",
-        "update_case",
-        "view_analytics",
-    ],
-    "senior_analyst": [
+    "investigator": [
         "view_claim",
         "view_score",
         "view_features",
@@ -126,20 +108,46 @@ ROLE_PERMISSION_MAP: dict[str, list[str]] = {
         "view_claim",
         "view_score",
     ],
-    "sha_integration": [
-        "ingest_claim",
-        "score_claim",
-        "view_claim",
-    ],
 }
 
 
 # ── Default Superuser ──────────────────────────────────────────────────────────
-# Only created if no superuser exists. Change password immediately after first login.
+# Only created if no superuser exists.
+# Values are loaded from environment variables — never hardcode credentials here.
+# Required variables in your .env file:
+#   SUPERUSER_EMAIL
+#   SUPERUSER_FULL_NAME
+#   SUPERUSER_PASSWORD
+
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+_email = os.getenv("SUPERUSER_EMAIL")
+_name = os.getenv("SUPERUSER_FULL_NAME")
+_password = os.getenv("SUPERUSER_PASSWORD")
+
+_missing = [
+    k
+    for k, v in {
+        "SUPERUSER_EMAIL": _email,
+        "SUPERUSER_FULL_NAME": _name,
+        "SUPERUSER_PASSWORD": _password,
+    }.items()
+    if not v
+]
+
+if _missing:
+    raise EnvironmentError(
+        f"Missing required environment variable(s): {', '.join(_missing)}\n"
+        "Add them to your .env file before running the seeder."
+    )
 
 DEFAULT_SUPERUSER = {
-    "email": "admin@afyaguard.go.ke",
-    "full_name": "System Administrator",
-    "password": "AfyaGuard@2026!",  # ← CHANGE THIS on first login
+    "email": _email,
+    "full_name": _name,
+    "password": _password,
     "is_superuser": True,
 }
