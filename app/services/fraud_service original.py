@@ -28,6 +28,7 @@ from app.detectors.ghost_provider_detector import GhostProviderDetector
 from app.detectors.phantom_patient_detector import PhantomPatientDetector
 from app.detectors.provider_profiler_detector import ProviderProfiler
 from app.detectors.upcoding_detector import UpcodingDetector
+from app.models.claim_feature_model import ClaimFeature
 from app.models.claim_model import Claim
 from app.models.enums_model import (
     AlertSeverity,
@@ -43,7 +44,7 @@ from app.models.fraud_case_model import FraudCase
 from app.models.fraud_explanation_model import FraudExplanation
 from app.models.fraud_rule_model import FraudRule
 from app.models.fraud_score_model import FraudScore
-from app.models.claim_feature_model import ClaimFeature
+from app.models.model_version_model import ModelVersion
 from app.services.audit_service import AuditService
 from app.services.feature_service import FeatureService
 from app.utils.provider_utils import parse_facility_level
@@ -55,12 +56,7 @@ _feature_list: Optional[list] = None
 
 
 def load_ml_artifacts() -> None:
-    """
-    Load XGBoost model from the canonical paths in MODEL_DIR.
-    Called once from FastAPI lifespan startup.
-    Skips silently if the model is already loaded — use reload_ml_artifacts()
-    to force a hot-swap.
-    """
+    """Load XGBoost model. Call once from FastAPI lifespan startup."""
     global _xgb_model, _feature_list
     try:
         import joblib
@@ -74,58 +70,12 @@ def load_ml_artifacts() -> None:
             )
             return
         if _xgb_model is not None:
-            return  # Already loaded — call reload_ml_artifacts() to force a swap
+            return
         _xgb_model = joblib.load(model_path)
         _feature_list = joblib.load(feature_path)
-        logger.info(f"ML model loaded from {model_path}")
+        logger.info(f"ML model loaded: {model_path}")
     except Exception as exc:
         logger.error(f"Failed to load ML model: {exc}")
-
-
-def reload_ml_artifacts(artifact_path: Optional[str] = None) -> None:
-    """
-    Hot-swap the in-memory XGBoost model without restarting the server.
-
-    Called by ModelService.deploy_model() immediately after the DB record
-    is committed, and by the retrain script after auto-deploy.
-
-    Args:
-        artifact_path: Explicit path to the .joblib file to load.
-                       If None, reloads from the canonical MODEL_DIR paths
-                       (fraud_xgboost.joblib / feature_list.joblib).
-
-    Raises:
-        FileNotFoundError if the specified artifact_path does not exist.
-        Any joblib/pickle exception if the file is corrupt.
-    """
-    global _xgb_model, _feature_list
-    from pathlib import Path
-
-    import joblib
-
-    if artifact_path:
-        model_path = Path(artifact_path)
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"Artifact not found at '{artifact_path}'. "
-                f"Check that the model was saved before deploying."
-            )
-        # Derive feature list path: same stem, _features suffix
-        # Falls back to canonical feature_list.joblib if not found
-        feature_path = model_path.parent / f"feature_list{model_path.suffix}"
-        if not feature_path.exists():
-            feature_path = settings.MODEL_DIR / "feature_list.joblib"
-    else:
-        model_path = settings.MODEL_DIR / "fraud_xgboost.joblib"
-        feature_path = settings.MODEL_DIR / "feature_list.joblib"
-
-    new_model = joblib.load(model_path)
-    new_feature_list = joblib.load(feature_path) if feature_path.exists() else None
-
-    # Atomic assignment — Python's GIL makes this safe for concurrent requests
-    _xgb_model = new_model
-    _feature_list = new_feature_list
-    logger.info(f"ML model hot-swapped from {model_path}")
 
 
 # FIX: GHOST_PROVIDER added — requires AlertType.GHOST_PROVIDER in fraud_alert.py
