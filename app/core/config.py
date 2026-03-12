@@ -43,8 +43,18 @@ class Settings(BaseSettings):
     ML_SCORE_WEIGHT: float = 0.4
     DETECTOR_SCORE_WEIGHT: float = 0.2
     # ── ML Model ──────────────────────────────────────────────────────────────
-    ML_MODEL_PATH: str = "ml_models"
+    ML_MODEL_DIR: str = "ml_models"
     ML_MODEL_FALLBACK_ENABLED: bool = True
+
+    @property
+    def MODEL_DIR(self) -> Path:
+        """Resolved Path to the model artifact directory. Created on first access."""
+        p = Path(self.ML_MODEL_DIR)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    RETRAIN_MIN_SAMPLES: int = 50
+
     # ── Alert Settings ────────────────────────────────────────────────────────
     ALERT_AUTO_ESCALATE_HOURS: int = 24
     ALERT_EXPIRE_HOURS: int = 72
@@ -60,17 +70,6 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",")]
         return v
-
-    # ── ADDED: Path property wrapping ML_MODEL_PATH ───────────────────────────
-    @property
-    def MODEL_DIR(self) -> Path:
-        """
-        Returns ML_MODEL_PATH as a Path object.
-        Used by fraud_service.load_ml_artifacts() to locate:
-          - ml_models/fraud_xgboost.joblib
-          - ml_models/feature_list.joblib
-        """
-        return Path(self.ML_MODEL_PATH)
 
 
 settings = Settings()
