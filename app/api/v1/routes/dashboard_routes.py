@@ -12,6 +12,7 @@ All endpoints are async and use COUNT/SUM SQL aggregates.
 No rows are fetched into Python memory for counting.
 """
 
+import uuid
 from typing import List
 
 from fastapi import APIRouter, Depends, Query
@@ -26,7 +27,9 @@ from app.schemas.dashboard_schema import (
     CountyFraudData,
     DashboardResponse,
     DashboardStats,
+    ProviderSubmissionTrend,
     RiskDistribution,
+    TopFlaggedProvider,
     TrendData,
 )
 from app.services.alert_service import AlertService
@@ -208,4 +211,69 @@ async def get_critical_alerts(
         page=1,
         page_size=limit,
         pages=1,
+    )
+
+
+# ── Top flagged providers ─────────────────────────────────────────────────────
+
+
+@router.get(
+    "/dashboard/top-providers",
+    response_model=List[TopFlaggedProvider],
+    summary="Top flagged providers",
+    description="""
+Returns the top N providers ranked by number of flagged claims in the last `days` days.
+
+Each row matches the TypeScript **TopFlaggedProvider** interface:
+- `provider_id`    — UUID of the provider
+- `name`           — provider facility name
+- `county`         — county of the facility
+- `total_claims`   — all claims submitted by this provider in the window
+- `flagged_claims` — claims with FLAGGED or UNDER_REVIEW status
+- `fraud_rate`     — `flagged_claims / total_claims` (0.0 – 1.0)
+- `avg_risk_score` — mean final_score from the latest FraudScore per claim (0 – 100)
+- `estimated_loss` — sum of estimated_loss on CONFIRMED_FRAUD cases (KES)
+
+Query params:
+- `limit` — number of providers to return (default 10, max 50)
+- `days`  — lookback window in days (default 30, max 365)
+""",
+)
+async def get_top_providers(
+    limit: int = Query(10, ge=1, le=50, description="Number of providers to return"),
+    days: int = Query(30, ge=1, le=365, description="Lookback window in days"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("view_analytics")),
+):
+    return await DashboardService.get_top_providers(db, limit=limit, days=days)
+
+
+# ── Provider submission trend ─────────────────────────────────────────────────
+
+
+@router.get(
+    "/dashboard/provider-trend/{provider_id}",
+    response_model=ProviderSubmissionTrend,
+    summary="Daily submission trend for a single provider",
+    description="""
+Returns the daily total and flagged claim count for a single provider
+over the last `days` days. Used by the ProviderSubmissionChart component
+that appears when a provider row is clicked in the Top Flagged Providers widget.
+
+Response matches the TypeScript **ProviderSubmissionTrend** interface:
+- `provider_id`   — echoed back
+- `provider_name` — facility name (saves a second lookup)
+- `trend`         — array of `{ date, total_claims, flagged_claims }` sorted ascending
+
+Returns 404 if the provider_id does not exist.
+""",
+)
+async def get_provider_trend(
+    provider_id: uuid.UUID,
+    days: int = Query(30, ge=1, le=365, description="Lookback window in days"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("view_analytics")),
+):
+    return await DashboardService.get_provider_trend(
+        db, provider_id=provider_id, days=days
     )
