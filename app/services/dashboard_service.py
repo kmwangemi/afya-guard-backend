@@ -14,22 +14,18 @@ Key improvements over the original analytics_summary endpoint:
   7. Recent critical alerts: reuses the AlertService list path.
 """
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import List, Tuple
 
+from fastapi import HTTPException
 from sqlalchemy import Float, case, cast, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.functions import count
 
 from app.models.claim_model import Claim
-from app.models.enums_model import (
-    AlertSeverity,
-    AlertStatus,
-    CaseStatus,
-    ClaimStatus,
-    RiskLevel,
-)
-from app.models.fraud_alert_model import FraudAlert
+from app.models.enums_model import CaseStatus, ClaimStatus, RiskLevel
+from app.models.fraud_alert_model import AlertSeverity, AlertStatus, FraudAlert
 from app.models.fraud_case_model import FraudCase
 from app.models.fraud_score_model import FraudScore
 from app.models.provider_model import Provider
@@ -37,8 +33,11 @@ from app.schemas.dashboard_schema import (
     CountyFraudData,
     DashboardResponse,
     DashboardStats,
+    ProviderSubmissionPoint,
+    ProviderSubmissionTrend,
     RiskDistribution,
     RiskDistributionItem,
+    TopFlaggedProvider,
     TrendData,
 )
 
@@ -204,19 +203,11 @@ class DashboardService:
     @staticmethod
     async def get_trend(db: AsyncSession, days: int = 30) -> List[TrendData]:
         """
-        Return one TrendData point per day.
-        Window starts from the earliest submitted_at in DB if it's older than `days`.
+        Return one TrendData point per day for the last `days` days.
+        Uses DATE_TRUNC + GROUP BY — one query for the whole date range.
         """
-        now = datetime.now(UTC)
-        default_since = now - timedelta(days=days)
-
-        # Find the earliest claim submission date
-        earliest_result = await db.execute(
-            select(func.min(Claim.submitted_at))
-        )
-        earliest = earliest_result.scalar_one()
-        # Use whichever is older — default window or earliest claim
-        since = min(default_since, earliest) if earliest else default_since
+        since = datetime.now(UTC) - timedelta(days=days)
+        # Daily total and flagged claim counts
         daily = await db.execute(
             select(
                 func.date_trunc("day", Claim.submitted_at).label("day"),
@@ -292,13 +283,13 @@ class DashboardService:
         total = sum(rows.values())
         items = []
         for level in _RISK_ORDER:
-            level_count = rows.get(level, 0)
-            pct = round((level_count / total) * 100, 1) if total > 0 else 0.0
+            risk_count = rows.get(level, 0)
+            pct = round((risk_count / total) * 100, 1) if total > 0 else 0.0
             items.append(
                 RiskDistributionItem(
                     label=level.value.capitalize(),
                     risk_level=level.value,
-                    count=level_count,
+                    count=risk_count,
                     percentage=pct,
                     colour=_RISK_COLOURS[level],
                 )
@@ -374,6 +365,200 @@ class DashboardService:
             )
         return result
 
+    # ── Top flagged providers ─────────────────────────────────────────────────
+
+    @staticmethod
+    async def get_top_providers(
+        db: AsyncSession, limit: int = 10, days: int = 30
+    ) -> list[TopFlaggedProvider]:
+        """
+        Return the top `limit` providers with the most flagged claims
+        in the last `days` days, sorted by flagged claim count descending.
+
+        For each provider we compute:
+          - total_claims       : all claims submitted in the window
+          - flagged_claims     : claims with FLAGGED / UNDER_REVIEW status
+          - fraud_rate         : flagged / total
+          - avg_risk_score     : mean final_score from the latest FraudScore
+                                 per claim in the window
+          - estimated_loss     : sum of estimated_loss on CONFIRMED_FRAUD
+                                 cases linked to this provider's claims
+        """
+        since = datetime.now(UTC) - timedelta(days=days)
+
+        # ── Subquery: latest FraudScore per claim ─────────────────────────────
+        latest_score_sq = (
+            select(
+                FraudScore.claim_id,
+                func.max(FraudScore.scored_at).label("latest"),
+            )
+            .group_by(FraudScore.claim_id)
+            .subquery()
+        )
+
+        # ── Subquery: avg risk score per provider in the window ───────────────
+        avg_score_sq = (
+            select(
+                Claim.provider_id,
+                func.avg(FraudScore.final_score).label("avg_score"),
+            )
+            .join(
+                latest_score_sq,
+                (FraudScore.claim_id == latest_score_sq.c.claim_id)
+                & (FraudScore.scored_at == latest_score_sq.c.latest),
+            )
+            .join(Claim, FraudScore.claim_id == Claim.id)
+            .filter(Claim.submitted_at >= since)
+            .group_by(Claim.provider_id)
+            .subquery()
+        )
+
+        # ── Subquery: estimated loss per provider from confirmed cases ────────
+        loss_sq = (
+            select(
+                Claim.provider_id,
+                func.coalesce(func.sum(FraudCase.estimated_loss), 0).label("est_loss"),
+            )
+            .join(FraudCase, FraudCase.claim_id == Claim.id)
+            .filter(
+                FraudCase.status == CaseStatus.CONFIRMED_FRAUD,
+                FraudCase.estimated_loss.isnot(None),
+                Claim.submitted_at >= since,
+            )
+            .group_by(Claim.provider_id)
+            .subquery()
+        )
+
+        # ── Main query: aggregate claims per provider ─────────────────────────
+        rows = await db.execute(
+            select(
+                Provider.id.label("provider_id"),
+                Provider.name,
+                Provider.county,
+                count(Claim.id).label("total_claims"),
+                func.sum(
+                    case(
+                        (
+                            Claim.sha_status.in_(
+                                [ClaimStatus.FLAGGED, ClaimStatus.UNDER_REVIEW]
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("flagged_claims"),
+                func.coalesce(avg_score_sq.c.avg_score, 0).label("avg_risk_score"),
+                func.coalesce(loss_sq.c.est_loss, 0).label("estimated_loss"),
+            )
+            .join(Claim, Claim.provider_id == Provider.id)
+            .outerjoin(avg_score_sq, avg_score_sq.c.provider_id == Provider.id)
+            .outerjoin(loss_sq, loss_sq.c.provider_id == Provider.id)
+            .filter(Claim.submitted_at >= since)
+            .group_by(
+                Provider.id,
+                Provider.name,
+                Provider.county,
+                avg_score_sq.c.avg_score,
+                loss_sq.c.est_loss,
+            )
+            .order_by(
+                func.sum(
+                    case(
+                        (
+                            Claim.sha_status.in_(
+                                [ClaimStatus.FLAGGED, ClaimStatus.UNDER_REVIEW]
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).desc()
+            )
+            .limit(limit)
+        )
+
+        result = []
+        for row in rows.all():
+            total = int(row.total_claims or 0)
+            flagged = int(row.flagged_claims or 0)
+            result.append(
+                TopFlaggedProvider(
+                    provider_id=str(row.provider_id),
+                    name=row.name,
+                    county=row.county,
+                    total_claims=total,
+                    flagged_claims=flagged,
+                    fraud_rate=round(flagged / total, 4) if total > 0 else 0.0,
+                    avg_risk_score=round(float(row.avg_risk_score or 0), 2),
+                    estimated_loss=float(row.estimated_loss or 0),
+                )
+            )
+        return result
+
+    # ── Provider submission trend ─────────────────────────────────────────────
+
+    @staticmethod
+    async def get_provider_trend(
+        db: AsyncSession, provider_id: uuid.UUID, days: int = 30
+    ) -> ProviderSubmissionTrend:
+        """
+        Return the daily total and flagged claim count for a single provider
+        over the last `days` days. Used by the ProviderSubmissionChart component.
+        """
+        # Verify provider exists
+        provider_row = await db.execute(
+            select(Provider.id, Provider.name).where(Provider.id == provider_id)
+        )
+        provider = provider_row.first()
+        if not provider:
+            raise HTTPException(status_code=404, detail="Provider not found")
+
+        since = datetime.now(UTC) - timedelta(days=days)
+
+        daily = await db.execute(
+            select(
+                func.date_trunc("day", Claim.submitted_at).label("day"),
+                count(Claim.id).label("total"),
+                func.sum(
+                    case(
+                        (
+                            Claim.sha_status.in_(
+                                [ClaimStatus.FLAGGED, ClaimStatus.UNDER_REVIEW]
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("flagged"),
+            )
+            .filter(
+                Claim.provider_id == provider_id,
+                Claim.submitted_at >= since,
+            )
+            .group_by(text("day"))
+            .order_by(text("day"))
+        )
+        trend = []
+        for row in daily.all():
+            day_dt = row.day
+            day_str = (
+                day_dt.date().isoformat()
+                if isinstance(day_dt, datetime)
+                else str(day_dt)
+            )
+            trend.append(
+                ProviderSubmissionPoint(
+                    date=day_str,
+                    total_claims=int(row.total or 0),
+                    flagged_claims=int(row.flagged or 0),
+                )
+            )
+        return ProviderSubmissionTrend(
+            provider_id=str(provider.id),
+            provider_name=provider.name,
+            trend=trend,
+        )
+
     # ── Full dashboard (single call) ──────────────────────────────────────────
 
     @staticmethod
@@ -388,6 +573,7 @@ class DashboardService:
         trend = await DashboardService.get_trend(db, days=trend_days)
         risk_dist = await DashboardService.get_risk_distribution(db)
         counties = await DashboardService.get_top_counties(db)
+
         return DashboardResponse(
             stats=stats,
             trend=trend,

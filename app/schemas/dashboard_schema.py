@@ -28,10 +28,9 @@ Shaped to match both the frontend TypeScript interfaces and Dashboard-stats.png:
     Thin wrapper — reuses AlertListItem from alert_schema.
 """
 
-from typing import List
+from typing import List, Optional
 
 from app.schemas.base_schema import BaseSchema
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STAT CARDS  (top row of dashboard)
@@ -132,6 +131,49 @@ class CountyFraudData(BaseSchema):
     flaggedClaims: int
     fraudRate: float  # 0.0 – 1.0
     estimatedAmount: float  # raw KES
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TOP FLAGGED PROVIDERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TopFlaggedProvider(BaseSchema):
+    """
+    One row in the Top Flagged Providers widget.
+    Field names use snake_case — the frontend TopFlaggedProvider interface
+    also uses snake_case so no mapping is needed in dashboardService.ts.
+    """
+
+    provider_id: str
+    name: str
+    county: Optional[str] = None
+    total_claims: int
+    flagged_claims: int
+    fraud_rate: float  # 0.0 – 1.0
+    avg_risk_score: float  # 0 – 100
+    estimated_loss: float  # raw KES
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROVIDER SUBMISSION TREND
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class ProviderSubmissionPoint(BaseSchema):
+    """One day in a provider's daily submission trend."""
+
+    date: str  # "2026-02-04"
+    total_claims: int
+    flagged_claims: int
+
+
+class ProviderSubmissionTrend(BaseSchema):
+    """Daily submission trend for a single provider."""
+
+    provider_id: str
+    provider_name: str
+    trend: List[ProviderSubmissionPoint] = []
 
 
 # ══════════════════════════════════════════════════════════════════════════════
