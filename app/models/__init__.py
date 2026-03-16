@@ -34,6 +34,7 @@ from app.models.model_version_model import ModelVersion
 from app.models.permission_model import Permission
 from app.models.provider_model import Provider
 from app.models.refresh_token_model import RefreshToken
+from app.models.report_model import FraudReport
 from app.models.role_model import Role
 from app.models.user_model import User
 
@@ -78,4 +79,5 @@ __all__ = [
     "User",
     "AuditLog",
     "RefreshToken",
+    "FraudReport",
 ]
