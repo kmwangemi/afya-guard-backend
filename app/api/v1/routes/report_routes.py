@@ -77,20 +77,17 @@ async def list_reports(
             422,
             f"Invalid report_type '{report_type}'. Valid: {[t.value for t in ReportType]}",
         )
-
     try:
         status_filter = ReportStatus(status) if status else None
     except ValueError:
         raise HTTPException(
             422, f"Invalid status '{status}'. Valid: {[s.value for s in ReportStatus]}"
         )
-
     filters = ReportListFilter(
         search=search,
         report_type=type_filter,
         status=status_filter,
     )
-
     return await ReportService.list_reports(
         db, filters, offset=pagination.offset, limit=pagination.page_size
     )
