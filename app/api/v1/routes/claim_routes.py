@@ -11,6 +11,16 @@ PATCH  /api/v1/claims/{id}/status               Update claim status
 GET    /api/v1/claims/{id}/features             Get engineered ML features
 POST   /api/v1/claims/{id}/features/recompute   Re-run feature engineering
 POST   /api/v1/claims/{id}/score                Trigger fraud scoring
+
+FIX (background scoring):
+  The original _score() closure captured the request-scoped db session.
+  By the time FastAPI runs the background task, that session is already
+  closed — the claim object is detached, all relationships are gone, and
+  every detector short-circuits to score=0.
+
+  Fix: background task opens its own AsyncSession via get_async_session(),
+  re-fetches the claim with _load_claim() (selectinload on all relationships),
+  then scores it in that fresh session.
 """
 
 import uuid
@@ -19,6 +29,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import get_async_session  # FIX: own session for bg task
 from app.core.dependencies import PaginationParams, get_db, require_permission
 from app.models.enums_model import ClaimStatus, RiskLevel
 from app.models.user_model import User
@@ -41,6 +52,28 @@ from app.services.feature_service import FeatureService
 from app.services.fraud_service import FraudService
 
 router = APIRouter(tags=["Claims"])
+
+
+# ── Background scoring task ───────────────────────────────────────────────────
+
+
+async def _score_claim_background(claim_id: uuid.UUID) -> None:
+    """
+    Run the full fraud scoring pipeline in an isolated AsyncSession.
+
+    Must NOT reuse the request-scoped db session — that session is closed
+    by the time FastAPI executes background tasks. Opening a fresh session
+    here ensures:
+      1. The session is alive for the full duration of scoring.
+      2. _load_claim() can selectinload all relationships (member, provider,
+         services) so every detector receives a fully-populated Claim object.
+      3. No DetachedInstanceError or MissingGreenlet from lazy-load attempts
+         on a closed session.
+    """
+    async with get_async_session() as db:
+        claim = await ClaimService_.get_claim(db, claim_id)
+        engine = FraudService(db)
+        await engine.score_claim(claim, scored_by="system", triggered_by_user_id=None)
 
 
 # ── Provider ──────────────────────────────────────────────────────────────────
@@ -106,7 +139,6 @@ Filters against the claim's latest fraud score.
 """,
 )
 async def list_claims(
-    # ── UI filter panel params ───────────────────────────────────────────────
     search: Optional[str] = Query(
         None,
         description="Search by claim # or provider name",
@@ -127,13 +159,10 @@ async def list_claims(
         description="Filter by provider county (partial match)",
         examples="Nairobi",
     ),
-    # ── Pagination ───────────────────────────────────────────────────────────
     pagination: PaginationParams = Depends(),
-    # ── Auth ─────────────────────────────────────────────────────────────────
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("view_claim")),
 ):
-    # Parse and validate enum values
     try:
         status_filter = ClaimStatus(status) if status else None
     except ValueError:
@@ -192,13 +221,12 @@ async def ingest_claim(
         db, data, ingested_by_user_id=current_user.id
     )
 
-    async def _score():
-        engine = FraudService(db)
-        await engine.score_claim(claim, scored_by="system", triggered_by_user_id=None)
+    # FIX: pass only the claim_id (a plain UUID — not the ORM object).
+    # The background task opens its own session and re-fetches the claim
+    # with all relationships loaded. Passing the ORM object itself would
+    # give the task a detached instance on a closed session.
+    background_tasks.add_task(_score_claim_background, claim.id)
 
-    background_tasks.add_task(_score)
-
-    # Return a ClaimListItem immediately — score will arrive asynchronously
     return ClaimListItem(
         id=claim.id,
         sha_claim_id=claim.sha_claim_id,
@@ -266,7 +294,6 @@ async def update_claim_status(
     await ClaimService_.update_claim_status(
         db, claim_id, data, updated_by_user_id=current_user.id
     )
-    # Return the full detail view so the frontend can update in one round-trip
     return await ClaimService_.get_claim_detail(db, claim_id)
 
 
@@ -324,6 +351,8 @@ async def score_claim(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("score_claim")),
 ):
+    # get_claim() uses _load_claim() — all relationships are selectinloaded.
+    # This route was already correct; no change needed here.
     claim = await ClaimService_.get_claim(db, claim_id)
     engine = FraudService(db)
     fraud_score = await engine.score_claim(

@@ -1,3 +1,6 @@
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -24,6 +27,35 @@ class Base(DeclarativeBase):
 
 
 async def get_db():
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+# ── Background-task / out-of-request session factory ─────────────────────────
+
+
+@asynccontextmanager
+async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Async context manager that opens a fresh, independent AsyncSession.
+
+    Use for:
+      - Background tasks (FastAPI BackgroundTasks, Celery workers)
+      - CLI scripts that need DB access
+      - Any code that runs after the HTTP request is complete
+
+    Example:
+        async with get_async_session() as db:
+            result = await db.execute(select(Claim).where(...))
+
+    The session is committed and closed automatically on exit.
+    On exception it is rolled back and re-raised.
+    """
     async with AsyncSessionLocal() as session:
         try:
             yield session
