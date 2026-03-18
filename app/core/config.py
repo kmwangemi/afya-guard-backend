@@ -40,8 +40,8 @@ class Settings(BaseSettings):
     FRAUD_CRITICAL_THRESHOLD: float = 90.0
     # Score weights (must sum to 1.0)
     RULE_SCORE_WEIGHT: float = 0.4
-    ML_SCORE_WEIGHT: float = 0.4
-    DETECTOR_SCORE_WEIGHT: float = 0.2
+    ML_SCORE_WEIGHT: float = 0.3
+    DETECTOR_SCORE_WEIGHT: float = 0.3
     # ── ML Model ──────────────────────────────────────────────────────────────
     ML_MODEL_DIR: str = "ml_models"
     ML_MODEL_FALLBACK_ENABLED: bool = True

@@ -2,12 +2,17 @@
 scripts/generate_dataset.py
 ────────────────────────────
 Generates a labelled SHA claims dataset with 23 clean, non-redundant features.
+Run this first, then run train_model.py.
 
-Removed vs previous version:
-  ❌ is_weekend       — duplicate of weekend_submission (same boolean, different name)
-  ❌ submitted_weekday — redundant, weekend_submission already captures Sat/Sun signal
+Usage:
+    python scripts/generate_dataset.py
+
+Outputs:
+    data/sha_claims_dataset.csv
+    data/county_encoder.json     ← loaded by both train_model.py and fraud_service.py
 """
 
+import json
 import os
 import random
 from datetime import date, datetime, timedelta
@@ -19,6 +24,24 @@ from faker import Faker
 fake = Faker("en_GB")
 random.seed(42)
 np.random.seed(42)
+
+# ── County encoder — deterministic, shared with train_model.py and serving ────
+# This dict is the single source of truth for county_enc across the entire
+# pipeline. Saved to data/county_encoder.json so train_model.py and
+# fraud_service.py both load the same mapping at train and serve time.
+
+COUNTY_MAP: dict = {
+    "Nairobi": 0,
+    "Mombasa": 1,
+    "Kisumu": 2,
+    "Nakuru": 3,
+    "Eldoret": 4,
+    "Kiambu": 5,
+    "Garissa": 6,
+    "Kitui": 7,
+    # unknown counties → 8
+}
+COUNTY_FALLBACK = 8
 
 # ── Reference data ────────────────────────────────────────────────────────────
 
@@ -225,34 +248,39 @@ HIGH_LEVEL_SERVICES = [
 ]
 
 # ── Feature list — single source of truth ─────────────────────────────────────
+# Order here must match ALL_FEATURES in train_model.py exactly.
 
 ALL_FEATURES = [
-    # Group A — read directly from ClaimFeature ORM fields (12)
-    "provider_avg_cost_90d",  # provider rolling 90d average claim cost
-    "provider_cost_zscore",  # std deviations from provider avg (upcoding)
-    "member_visits_30d",  # member claim count in last 30 days
-    "member_visits_7d",  # member claim count in last 7 days (spike)
-    "member_unique_providers_30d",  # unique providers in 30d (card sharing)
-    "duplicate_within_7d",  # same member + provider + diagnosis in 7d window
-    "length_of_stay",  # inpatient days (0 for outpatient)
-    "weekend_submission",  # submitted Saturday or Sunday (0/1)
-    "diagnosis_cost_zscore",  # cost vs typical for this diagnosis code
-    "service_count",  # number of service line items
-    "has_lab_without_diagnosis",  # lab billed but no matching clinical diagnosis
-    "has_surgery_without_theatre",  # surgery code present but no theatre fee
+    # Group A — ClaimFeature ORM fields (12)
+    "provider_avg_cost_90d",
+    "provider_cost_zscore",
+    "member_visits_30d",
+    "member_visits_7d",
+    "member_unique_providers_30d",
+    "duplicate_within_7d",
+    "length_of_stay",
+    "weekend_submission",
+    "diagnosis_cost_zscore",
+    "service_count",
+    "has_lab_without_diagnosis",
+    "has_surgery_without_theatre",
     # Group B — engineered in _features_to_dataframe (11)
-    "claim_type_enc",  # INPATIENT=0, OUTPATIENT=1
-    "county_enc",  # hash-encoded county (0–9)
-    "facility_level",  # facility tier 1–6
-    "log_amount",  # log(1 + total_claim_amount) — reduces skew
-    "amount_per_service",  # total / service_count
-    "amount_per_day",  # total / length_of_stay
-    "submitted_hour",  # 0–23 (off-hours detection)
-    "is_off_hours",  # submitted 11pm–5am (0/1)
-    "no_eligibility_check",  # no eligibility check before claim (0/1)
-    "high_service_count",  # service_count > 8 — unbundling signal (0/1)
-    "level_amount_mismatch",  # low-level facility + high amount (0/1)
+    "claim_type_enc",
+    "county_enc",
+    "facility_level",
+    "log_amount",
+    "amount_per_service",
+    "amount_per_day",
+    "submitted_hour",
+    "is_off_hours",
+    "no_eligibility_check",
+    "high_service_count",
+    "level_amount_mismatch",
 ]
+
+# Rolling window that mirrors FeatureService's 90-day DB query
+WINDOW_SIZE = 90
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -276,7 +304,6 @@ def pick_services(claim_type: str, n: int = None) -> list:
     return [
         {
             "service_code": s["code"],
-            "service_name": s["name"],
             "quantity": random.randint(1, 3),
             "unit_price": round(random.uniform(s["min"], s["max"]), 2),
             "is_lab": s["is_lab"],
@@ -287,22 +314,41 @@ def pick_services(claim_type: str, n: int = None) -> list:
 
 
 def compute_provider_stats(provider_code: str, history: dict) -> tuple:
+    """Rolling WINDOW_SIZE slice — mirrors FeatureService 90-day query."""
     h = history.get(provider_code, [])
-    if len(h) < 3:
+    window = h[-WINDOW_SIZE:] if len(h) >= WINDOW_SIZE else h
+    if len(window) < 3:
         return 0.0, 0.0
-    avg = float(np.mean(h))
-    std = float(np.std(h)) or 1.0
+    avg = float(np.mean(window))
+    std = float(np.std(window)) or 1.0
     zscore = (h[-1] - avg) / std
     return round(avg, 2), round(zscore, 4)
 
 
 def compute_diagnosis_zscore(code: str, amount: float, history: dict) -> float:
+    """Rolling WINDOW_SIZE slice — mirrors FeatureService 90-day query."""
     h = history.get(code, [])
-    if len(h) < 3:
+    window = h[-WINDOW_SIZE:] if len(h) >= WINDOW_SIZE else h
+    if len(window) < 3:
         return 0.0
-    avg = float(np.mean(h))
-    std = float(np.std(h)) or 1.0
+    avg = float(np.mean(window))
+    std = float(np.std(window)) or 1.0
     return round((amount - avg) / std, 4)
+
+
+def _recompute_derived(claim: dict) -> dict:
+    """
+    Recomputes log_amount, amount_per_service, amount_per_day after any
+    mutation to total_claim_amount or service_count. Call at the end of every
+    fraud injector that changes either of those values.
+    """
+    total = claim["total_claim_amount"]
+    svc = max(claim["service_count"], 1)
+    los = max(claim["length_of_stay"], 1)
+    claim["log_amount"] = round(float(np.log1p(total)), 6)
+    claim["amount_per_service"] = round(total / svc, 2)
+    claim["amount_per_day"] = round(total / los, 2)
+    return claim
 
 
 # ── Legitimate claim builder ──────────────────────────────────────────────────
@@ -326,8 +372,11 @@ def make_legitimate_claim(
 
     services = pick_services(claim_type)
     diagnosis = random.sample(DIAGNOSES, random.randint(1, 3))
+
+    # Extend to hour 23 so the model sees is_off_hours=0 at the boundary,
+    # not just up to 22.
     submitted_dt = datetime.combine(dis_date, datetime.min.time()) + timedelta(
-        hours=random.randint(6, 22), minutes=random.randint(0, 59)
+        hours=random.randint(6, 23), minutes=random.randint(0, 59)
     )
 
     for svc in services:
@@ -337,7 +386,7 @@ def make_legitimate_claim(
     service_count = len(services)
     submitted_hour = submitted_dt.hour
 
-    # Rolling statistics
+    # Rolling stats
     provider_history.setdefault(facility["code"], []).append(total)
     prov_avg, prov_zscore = compute_provider_stats(facility["code"], provider_history)
 
@@ -370,14 +419,14 @@ def make_legitimate_claim(
     )
 
     return {
-        # Identifiers — not features, kept for traceability
+        # Identifiers — not model features, kept for traceability
         "sha_claim_id": make_claim_id(),
         "member_id": member_id,
         "provider_code": facility["code"],
         "admission_date": adm_date.isoformat(),
         "discharge_date": dis_date.isoformat(),
         "claim_type": claim_type,
-        # ── Group A (12) ──────────────────────────────────────────────────────
+        # Group A (12)
         "provider_avg_cost_90d": prov_avg,
         "provider_cost_zscore": prov_zscore,
         "member_visits_30d": member_visit_counts[member_id]["30d"],
@@ -390,9 +439,9 @@ def make_legitimate_claim(
         "service_count": service_count,
         "has_lab_without_diagnosis": int(has_lab_without_dx),
         "has_surgery_without_theatre": int(has_surg_no_theatre),
-        # ── Group B (11) ──────────────────────────────────────────────────────
-        "claim_type_enc": 0 if claim_type == "INPATIENT" else 1,
-        "county_enc": hash(facility["county"]) % 10,
+        # Group B (11)
+        "claim_type_enc": 0 if claim_type.upper() == "INPATIENT" else 1,
+        "county_enc": COUNTY_MAP.get(facility["county"], COUNTY_FALLBACK),
         "facility_level": facility["level"],
         "log_amount": round(float(np.log1p(total)), 6),
         "amount_per_service": round(total / max(service_count, 1), 2),
@@ -402,7 +451,7 @@ def make_legitimate_claim(
         "no_eligibility_check": int(random.random() < 0.05),
         "high_service_count": int(service_count > 8),
         "level_amount_mismatch": int(facility["level"] <= 2 and total > 10000),
-        # Meta
+        # Labels
         "total_claim_amount": total,
         "is_fraud": 0,
         "fraud_type": None,
@@ -426,19 +475,13 @@ def inject_ghost_patient(claim: dict) -> dict:
 
 
 def inject_upcoding(claim: dict) -> dict:
-    m = random.uniform(3.0, 6.0)
-    claim["total_claim_amount"] = round(claim["total_claim_amount"] * m, 2)
-    claim["log_amount"] = round(float(np.log1p(claim["total_claim_amount"])), 6)
-    claim["amount_per_service"] = round(
-        claim["total_claim_amount"] / max(claim["service_count"], 1), 2
-    )
-    claim["amount_per_day"] = round(
-        claim["total_claim_amount"] / max(claim["length_of_stay"], 1), 2
+    claim["total_claim_amount"] = round(
+        claim["total_claim_amount"] * random.uniform(3.0, 6.0), 2
     )
     claim["provider_cost_zscore"] = round(random.uniform(3.0, 7.0), 4)
     claim["diagnosis_cost_zscore"] = round(random.uniform(3.0, 6.0), 4)
     claim.update({"is_fraud": 1, "fraud_type": "upcoding"})
-    return claim
+    return _recompute_derived(claim)
 
 
 def inject_duplicate(claim: dict, original: dict) -> dict:
@@ -463,28 +506,26 @@ def inject_phantom_service(claim: dict) -> dict:
     phantom = random.choice(HIGH_LEVEL_SERVICES)
     qty = random.randint(1, 5)
     price = round(random.uniform(phantom["min"], phantom["max"]), 2)
-    extra = round(price * qty, 2)
+
     claim["provider_code"] = facility["code"]
     claim["facility_level"] = facility["level"]
-    claim["total_claim_amount"] += extra
-    claim["log_amount"] = round(float(np.log1p(claim["total_claim_amount"])), 6)
+    claim["county_enc"] = COUNTY_MAP.get(facility["county"], COUNTY_FALLBACK)
+    claim["total_claim_amount"] += round(price * qty, 2)
     claim["service_count"] += 1
-    claim["amount_per_service"] = round(
-        claim["total_claim_amount"] / claim["service_count"], 2
-    )
     claim["level_amount_mismatch"] = 1
     claim["provider_cost_zscore"] = round(random.uniform(3.0, 8.0), 4)
     claim["high_service_count"] = int(claim["service_count"] > 8)
     if phantom["is_surgery"]:
         claim["has_surgery_without_theatre"] = 1
     claim.update({"is_fraud": 1, "fraud_type": "phantom_service"})
-    return claim
+    return _recompute_derived(claim)
 
 
 def inject_off_hours(claim: dict) -> dict:
+    hour = random.randint(0, 4)
     claim.update(
         {
-            "submitted_hour": random.randint(2, 4),
+            "submitted_hour": hour,
             "is_off_hours": 1,
             "weekend_submission": 0,
             "provider_cost_zscore": round(random.uniform(2.5, 5.0), 4),
@@ -500,14 +541,10 @@ def inject_unbundling(claim: dict) -> dict:
     extra_amount = round(sum(random.uniform(200, 800) for _ in range(extra_svcs)), 2)
     claim["service_count"] += extra_svcs
     claim["total_claim_amount"] += extra_amount
-    claim["log_amount"] = round(float(np.log1p(claim["total_claim_amount"])), 6)
-    claim["amount_per_service"] = round(
-        claim["total_claim_amount"] / claim["service_count"], 2
-    )
-    claim["high_service_count"] = int(claim["service_count"] > 8)
     claim["diagnosis_cost_zscore"] = round(random.uniform(2.0, 5.0), 4)
+    claim["high_service_count"] = int(claim["service_count"] > 8)
     claim.update({"is_fraud": 1, "fraud_type": "unbundling"})
-    return claim
+    return _recompute_derived(claim)
 
 
 def inject_lab_without_diagnosis(claim: dict) -> dict:
@@ -545,7 +582,21 @@ def inject_member_churning(claim: dict) -> dict:
     return claim
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# inject_duplicate is now included — was missing from the original list
+FRAUD_INJECTORS = [
+    inject_ghost_patient,
+    inject_upcoding,
+    inject_duplicate,
+    inject_phantom_service,
+    inject_off_hours,
+    inject_unbundling,
+    inject_lab_without_diagnosis,
+    inject_surgery_without_theatre,
+    inject_member_churning,
+]
+
+
+# ── Main generation function ──────────────────────────────────────────────────
 
 
 def generate_dataset(n_legit: int = 8000, fraud_ratio: float = 0.15) -> pd.DataFrame:
@@ -570,18 +621,7 @@ def generate_dataset(n_legit: int = 8000, fraud_ratio: float = 0.15) -> pd.DataF
         claims.append(c)
 
     n_fraud = int(n_legit * fraud_ratio / (1 - fraud_ratio))
-    print(f"Injecting {n_fraud} fraud samples ({fraud_ratio*100:.0f}% of total)...")
-
-    fraud_injectors = [
-        inject_ghost_patient,
-        inject_upcoding,
-        inject_phantom_service,
-        inject_off_hours,
-        inject_unbundling,
-        inject_lab_without_diagnosis,
-        inject_surgery_without_theatre,
-        inject_member_churning,
-    ]
+    print(f"Injecting {n_fraud} fraud samples ({fraud_ratio * 100:.0f}% of total)...")
 
     fraud_claims = []
     for _ in range(n_fraud):
@@ -593,39 +633,60 @@ def generate_dataset(n_legit: int = 8000, fraud_ratio: float = 0.15) -> pd.DataF
             diagnosis_history,
             claims,
         ).copy()
-        injector = random.choice(fraud_injectors)
-        base = (
-            inject_duplicate(base, random.choice(claims))
-            if injector == inject_duplicate and claims
-            else injector(base)
-        )
+        injector = random.choice(FRAUD_INJECTORS)
+
+        # inject_duplicate needs an original claim to copy — handle separately
+        if injector == inject_duplicate:
+            base = (
+                inject_duplicate(base, random.choice(claims))
+                if claims
+                else inject_ghost_patient(base)
+            )
+        else:
+            base = injector(base)
+
         fraud_claims.append(base)
 
     all_claims = claims + fraud_claims
     random.shuffle(all_claims)
     df = pd.DataFrame(all_claims)
 
-    print(f"\n── Dataset Summary ───────────────────────────────────────")
-    print(f"  Total rows : {len(df)}")
-    print(f"  Legitimate : {(df['is_fraud']==0).sum()}")
-    print(f"  Fraud      : {df['is_fraud'].sum()} ({df['is_fraud'].mean()*100:.1f}%)")
-    print(f"  Features   : {len(ALL_FEATURES)} (Group A: 12, Group B: 11)")
+    # Sanity check — all 23 features must be present
+    missing = [f for f in ALL_FEATURES if f not in df.columns]
+    if missing:
+        raise ValueError(f"Dataset is missing features: {missing}")
+
+    print(f"\n── Dataset summary ───────────────────────────────────────")
+    print(f"  Total rows  : {len(df)}")
+    print(f"  Legitimate  : {(df['is_fraud'] == 0).sum()}")
+    print(
+        f"  Fraud       : {df['is_fraud'].sum()} ({df['is_fraud'].mean() * 100:.1f}%)"
+    )
+    print(f"  Features    : {len(ALL_FEATURES)} (Group A: 12, Group B: 11)")
     print(f"\n── Fraud type breakdown ──────────────────────────────────")
     print(df[df["is_fraud"] == 1]["fraud_type"].value_counts().to_string())
-    print(f"\n── Features ──────────────────────────────────────────────")
-    for i, f in enumerate(ALL_FEATURES, 1):
-        group = "A" if i <= 12 else "B"
-        print(f"  [{group}] {i:02d}. {f}")
+    print(f"\n── county_enc distribution ───────────────────────────────")
+    print(df["county_enc"].value_counts().sort_index().to_string())
 
     return df
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
+
     df = generate_dataset(n_legit=8000, fraud_ratio=0.15)
-    df.to_csv("data/sha_claims_dataset.csv", index=False)
-    print("\nSaved → data/sha_claims_dataset.csv")
 
+    # 1. Save dataset
+    csv_path = "data/sha_claims_dataset.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"\nSaved → {csv_path}")
 
-# Generate the dataset
-# python app/scripts/generate_dataset.py
+    # 2. Save county encoder — no dependencies, always runs
+    encoder_path = "data/county_encoder.json"
+    with open(encoder_path, "w") as f:
+        json.dump(COUNTY_MAP, f, indent=2)
+    print(f"Saved → {encoder_path}")
+
+    print("\nNext step: python scripts/train_model.py")

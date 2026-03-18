@@ -13,12 +13,13 @@ Orchestrates the full fraud scoring pipeline for a claim:
   9. Auto FraudAlert generation
 """
 
+import json
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -28,6 +29,7 @@ from app.detectors.ghost_provider_detector import GhostProviderDetector
 from app.detectors.phantom_patient_detector import PhantomPatientDetector
 from app.detectors.provider_profiler_detector import ProviderProfiler
 from app.detectors.upcoding_detector import UpcodingDetector
+from app.models.claim_feature_model import ClaimFeature
 from app.models.claim_model import Claim
 from app.models.enums_model import (
     AlertSeverity,
@@ -43,7 +45,6 @@ from app.models.fraud_case_model import FraudCase
 from app.models.fraud_explanation_model import FraudExplanation
 from app.models.fraud_rule_model import FraudRule
 from app.models.fraud_score_model import FraudScore
-from app.models.claim_feature_model import ClaimFeature
 from app.services.audit_service import AuditService
 from app.services.feature_service import FeatureService
 from app.utils.provider_utils import parse_facility_level
@@ -52,32 +53,54 @@ logger = logging.getLogger(__name__)
 
 _xgb_model: Optional[object] = None
 _feature_list: Optional[list] = None
+_county_encoder: Optional[Dict[str, int]] = None  # loaded from county_encoder.json
+_COUNTY_FALLBACK = 8  # fallback for unknown counties
 
 
 def load_ml_artifacts() -> None:
     """
-    Load XGBoost model from the canonical paths in MODEL_DIR.
+    Load XGBoost model + feature list + county encoder from MODEL_DIR.
     Called once from FastAPI lifespan startup.
     Skips silently if the model is already loaded — use reload_ml_artifacts()
     to force a hot-swap.
     """
-    global _xgb_model, _feature_list
+    global _xgb_model, _feature_list, _county_encoder
     try:
         import joblib
 
         model_dir = settings.MODEL_DIR
         model_path = model_dir / "fraud_xgboost.joblib"
         feature_path = model_dir / "feature_list.joblib"
+        encoder_path = model_dir / "county_encoder.json"
+
         if not model_path.exists():
             logger.warning(
                 f"ML model not found at {model_path} — will use fallback scoring"
             )
             return
+
         if _xgb_model is not None:
             return  # Already loaded — call reload_ml_artifacts() to force a swap
+
         _xgb_model = joblib.load(model_path)
         _feature_list = joblib.load(feature_path)
+
+        # Load county encoder — must match the mapping used during training.
+        # Without this, county_enc is derived from hash() which is randomised per
+        # Python process, producing different integers at train vs serve time.
+        if encoder_path.exists():
+            with open(encoder_path) as f:
+                _county_encoder = json.load(f)
+            logger.info(f"County encoder loaded from {encoder_path}")
+        else:
+            logger.warning(
+                f"county_encoder.json not found at {encoder_path}. "
+                f"county_enc will fall back to hash() — predictions will be wrong. "
+                f"Re-run train_model.py to generate the encoder file."
+            )
+
         logger.info(f"ML model loaded from {model_path}")
+
     except Exception as exc:
         logger.error(f"Failed to load ML model: {exc}")
 
@@ -98,7 +121,7 @@ def reload_ml_artifacts(artifact_path: Optional[str] = None) -> None:
         FileNotFoundError if the specified artifact_path does not exist.
         Any joblib/pickle exception if the file is corrupt.
     """
-    global _xgb_model, _feature_list
+    global _xgb_model, _feature_list, _county_encoder
     from pathlib import Path
 
     import joblib
@@ -110,25 +133,37 @@ def reload_ml_artifacts(artifact_path: Optional[str] = None) -> None:
                 f"Artifact not found at '{artifact_path}'. "
                 f"Check that the model was saved before deploying."
             )
-        # Derive feature list path: same stem, _features suffix
-        # Falls back to canonical feature_list.joblib if not found
         feature_path = model_path.parent / f"feature_list{model_path.suffix}"
         if not feature_path.exists():
             feature_path = settings.MODEL_DIR / "feature_list.joblib"
+        encoder_path = model_path.parent / "county_encoder.json"
+        if not encoder_path.exists():
+            encoder_path = settings.MODEL_DIR / "county_encoder.json"
     else:
         model_path = settings.MODEL_DIR / "fraud_xgboost.joblib"
         feature_path = settings.MODEL_DIR / "feature_list.joblib"
+        encoder_path = settings.MODEL_DIR / "county_encoder.json"
 
     new_model = joblib.load(model_path)
     new_feature_list = joblib.load(feature_path) if feature_path.exists() else None
 
-    # Atomic assignment — Python's GIL makes this safe for concurrent requests
+    new_county_encoder = None
+    if encoder_path.exists():
+        with open(encoder_path) as f:
+            new_county_encoder = json.load(f)
+    else:
+        logger.warning(
+            f"county_encoder.json not found at {encoder_path} during hot-swap. "
+            f"county_enc will fall back to hash()."
+        )
+
+    # Atomic assignments — Python's GIL makes these safe for concurrent requests
     _xgb_model = new_model
     _feature_list = new_feature_list
+    _county_encoder = new_county_encoder
     logger.info(f"ML model hot-swapped from {model_path}")
 
 
-# FIX: GHOST_PROVIDER added — requires AlertType.GHOST_PROVIDER in fraud_alert.py
 # Module-level map: adding a new detector = one line here only.
 DETECTOR_ALERT_MAP: Dict[str, AlertType] = {
     "DuplicateDetector": AlertType.DUPLICATE_CLAIM,
@@ -177,18 +212,18 @@ class FraudService:
             r.detector_name: r.score for r in detector_results
         }
 
-        # FIX (Bug 2 from prior session): Use MAX detector score, not average.
+        # Use MAX detector score, not average.
         # Averaging a 100-point result across 4 detectors (3 at 0) produces 25 —
-        # masking a genuine fraud signal before the 0.2 weight is even applied.
+        # masking a genuine fraud signal before the weight is even applied.
         max_detector_score = max(detector_scores.values()) if detector_scores else 0.0
 
         # ── Step 4: ML scoring ────────────────────────────────────────────────
         ml_score, ml_explanations, model_version_id = self._run_ml_model(features)
 
         # ── Step 5: Aggregate final score ─────────────────────────────────────
-        # FIX (Bug 1 from prior session): Normalise weights dynamically.
-        # On a fresh install rule_score=0 and ml_score=0, so without this the
-        # detector contribution is crushed to detector_score × 0.2 only.
+        # Normalise weights dynamically — only include components that fired.
+        # On a fresh install rule_score=0 and ml_score=0; without normalisation
+        # the detector contribution would be crushed to score × weight only.
         active_weight = 0.0
         weighted_sum = 0.0
 
@@ -205,6 +240,26 @@ class FraudService:
             weighted_sum += max_detector_score * settings.DETECTOR_SCORE_WEIGHT
 
         final_score = (weighted_sum / active_weight) if active_weight > 0 else 0.0
+
+        # ── Strong-signal override ─────────────────────────────────────────────
+        # When any single detector fires at >= 75, a poorly-calibrated ML score
+        # must not suppress the final score below what the detectors alone justify.
+        # The 0.9 factor gives ML a small moderating role while ensuring a
+        # definitive clinical signal (inpatient codes on outpatient claim,
+        # suspended member, ICU price manipulation) cannot be diluted to MEDIUM
+        # by a model trained on milder fraud patterns.
+        #
+        # Example — current payload:
+        #   max_detector=80, ml=64.4, weighted_avg=69.6  (MEDIUM without override)
+        #   floor = 80 × 0.9 = 72.0
+        #   final_score = max(69.6, 72.0) = 72.0  →  HIGH
+        #
+        # After retraining ML on full fraud archetypes (ml ≈ 85+):
+        #   weighted_avg ≈ 82  →  floor = 72  →  max(82, 72) = 82  →  CRITICAL
+        if max_detector_score >= 75:
+            floor = max_detector_score * 0.9
+            final_score = max(final_score, floor)
+
         final_score = round(min(final_score, 100.0), 4)
 
         # ── Step 6: Determine risk level ──────────────────────────────────────
@@ -255,8 +310,6 @@ class FraudService:
 
         for result in detector_results:
             if result.fired:
-                # FIX (Bug from prior session): explain_map was computed but discarded —
-                # the result was never stored. Now used to build per-feature explanation rows.
                 explain_map: Dict[str, float] = {}
                 for detector in self.detectors:
                     if detector.name == result.detector_name:
@@ -300,7 +353,6 @@ class FraudService:
         await self.db.commit()
         await self.db.refresh(fraud_score)
 
-        # AuditService.log is async in this codebase — must await
         await AuditService.log(
             self.db,
             AuditAction.CLAIM_SCORED,
@@ -417,6 +469,7 @@ class FraudService:
 
             df = self._features_to_dataframe(features)
             prob = float(_xgb_model.predict_proba(df)[0][1]) * 100
+
             feature_list = _feature_list or list(df.columns)
             importances = _xgb_model.feature_importances_
             explanation_map = {
@@ -465,13 +518,19 @@ class FraudService:
         los = float(features.length_of_stay or 0)
         svc_count = int(features.service_count or 1)
 
-        # claim_type_enc: 0 = INPATIENT, 1 = everything else
+        # claim_type_enc: INPATIENT=0, OUTPATIENT=1
         claim_type_raw = str(getattr(claim, "claim_type", "") or "")
         claim_type_enc = 0 if claim_type_raw.upper() == "INPATIENT" else 1
 
-        # county_enc: stable hash bucket (0–9) matching training encoding
+        # county_enc — use the deterministic encoder loaded from county_encoder.json
+        # instead of hash(), which is randomised per Python process and produces
+        # different values at train vs serve time.
         county = str(getattr(provider, "county", "") or "Nairobi")
-        county_enc = hash(county) % 10
+        county_enc = (
+            _county_encoder.get(county, _COUNTY_FALLBACK)
+            if _county_encoder is not None
+            else hash(county) % 10  # last-resort fallback when encoder not loaded
+        )
 
         # facility_level: 1–6; default 4 (county hospital) when unknown
         facility_level = parse_facility_level(provider)
@@ -490,6 +549,7 @@ class FraudService:
         return pd.DataFrame(
             [
                 {
+                    # Group A — 12 ClaimFeature fields
                     "provider_avg_cost_90d": features.provider_avg_cost_90d or 0,
                     "provider_cost_zscore": features.provider_cost_zscore or 0,
                     "member_visits_30d": features.member_visits_30d or 0,
@@ -507,7 +567,7 @@ class FraudService:
                     "has_surgery_without_theatre": int(
                         features.has_surgery_without_theatre or False
                     ),
-                    # ── 11 features the trained model additionally expects ──────────────
+                    # Group B — 11 engineered features
                     "claim_type_enc": claim_type_enc,
                     "county_enc": county_enc,
                     "facility_level": facility_level,
@@ -551,8 +611,13 @@ class FraudService:
             if risk_level == RiskLevel.CRITICAL
             else CasePriority.HIGH
         )
+        max_result = await self.db.execute(
+            select(func.coalesce(func.max(FraudCase.case_number), 0))
+        )
+        next_case_number: int = max_result.scalar_one() + 1
         case = FraudCase(
             claim_id=claim.id,
+            case_number=next_case_number,
             fraud_score_id=fraud_score.id,
             status=CaseStatus.OPEN,
             priority=priority,
@@ -605,10 +670,10 @@ class FraudService:
             )
 
         for result in detector_results:
-            # FIX (Bug 3 from prior session): Gate on raw detector score >= 30,
-            # not final_score >= 50. The aggregation formula can reduce a 100-point
-            # detector result to under 50 on a fresh DB with no rules or ML model,
-            # so the old threshold would silently suppress all detector alerts.
+            # Gate on raw detector score >= 30, not final_score >= 50.
+            # The aggregation formula can reduce a 100-point detector result to
+            # under 50 on a fresh DB with no rules or ML model loaded, so the
+            # old threshold would silently suppress all detector alerts.
             if not result.fired or result.score < 30:
                 continue
 
@@ -636,7 +701,7 @@ class FraudService:
                     triggered_by=result.detector_name,
                     score_at_alert=fraud_score.final_score,
                     auto_escalate=False,
-                    expires_at=datetime.utcnow()
+                    expires_at=datetime.now(UTC)
                     + timedelta(hours=settings.ALERT_EXPIRE_HOURS),
                     metadata=result.metadata,
                 )
