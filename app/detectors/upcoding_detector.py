@@ -159,11 +159,20 @@ class UpcodingDetector(BaseDetector):
         )
         all_metadata["ml"] = ml_meta
 
+        # FIX: Dynamic weight redistribution if ML model is offline
+        current_weights = METHOD_WEIGHTS.copy()
+        if ml_meta.get("reason") == "ML model not loaded":
+            redistribute_pct = current_weights["ml"] / 3
+            current_weights["medical_logic"] += redistribute_pct
+            current_weights["statistical"] += redistribute_pct
+            current_weights["peer"] += redistribute_pct
+            current_weights["ml"] = 0.0
+
         final_score = (
-            med_score * METHOD_WEIGHTS["medical_logic"]
-            + stat_score * METHOD_WEIGHTS["statistical"]
-            + peer_score * METHOD_WEIGHTS["peer"]
-            + ml_score * METHOD_WEIGHTS["ml"]
+            med_score * current_weights["medical_logic"]
+            + stat_score * current_weights["statistical"]
+            + peer_score * current_weights["peer"]
+            + ml_score * current_weights["ml"]
         )
         final_score = round(min(final_score, MAX_SCORE), 4)
         fired = final_score > 0
@@ -191,7 +200,7 @@ class UpcodingDetector(BaseDetector):
                     "peer": round(peer_score, 4),
                     "ml": round(ml_score, 4),
                 },
-                "method_weights": METHOD_WEIGHTS,
+                "method_weights": current_weights,
                 **all_metadata,
             },
         )

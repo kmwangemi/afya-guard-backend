@@ -15,12 +15,13 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums_model import AuditAction
 from app.models.fraud_rule_model import FraudRule
 from app.models.model_version_model import ModelVersion
-from app.models.user_model import User
+from app.schemas.user_schema import UserResponse
 from app.schemas.admin_schema import (
     FraudRuleCreate,
     FraudRuleResponse,
@@ -43,10 +44,11 @@ logger = logging.getLogger(__name__)
 class RuleService:
 
     @staticmethod
-    def create_rule(
-        db: Session, data: FraudRuleCreate, created_by: User
+    async def create_rule(
+        db: AsyncSession, data: FraudRuleCreate, created_by: UserResponse
     ) -> FraudRuleResponse:
-        if db.query(FraudRule).filter(FraudRule.rule_name == data.rule_name).first():
+        result = await db.execute(select(FraudRule).filter(FraudRule.rule_name == data.rule_name))
+        if result.scalars().first():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Rule '{data.rule_name}' already exists",
@@ -56,10 +58,10 @@ class RuleService:
             created_by=created_by.id,
         )
         db.add(rule)
-        db.commit()
-        db.refresh(rule)
+        await db.commit()
+        await db.refresh(rule)
 
-        AuditService.log(
+        await AuditService.log(
             db,
             AuditAction.RULE_CREATED,
             user_id=created_by.id,
@@ -70,40 +72,45 @@ class RuleService:
         return FraudRuleResponse.model_validate(rule)
 
     @staticmethod
-    def list_rules(
-        db: Session,
+    async def list_rules(
+        db: AsyncSession,
         active_only: bool = False,
         category: Optional[str] = None,
     ) -> List[FraudRuleResponse]:
-        q = db.query(FraudRule)
+        q = select(FraudRule)
         if active_only:
             q = q.filter(FraudRule.is_active == True)
         if category:
             q = q.filter(FraudRule.category == category)
-        rules = q.order_by(FraudRule.weight.desc()).all()
+        q = q.order_by(FraudRule.weight.desc())
+        
+        result = await db.execute(q)
+        rules = result.scalars().all()
         return [FraudRuleResponse.model_validate(r) for r in rules]
 
     @staticmethod
-    def get_rule(db: Session, rule_id: uuid.UUID) -> FraudRuleResponse:
-        rule = db.query(FraudRule).filter(FraudRule.id == rule_id).first()
+    async def get_rule(db: AsyncSession, rule_id: uuid.UUID) -> FraudRuleResponse:
+        result = await db.execute(select(FraudRule).filter(FraudRule.id == rule_id))
+        rule = result.scalars().first()
         if not rule:
             raise HTTPException(status_code=404, detail="Rule not found")
         return FraudRuleResponse.model_validate(rule)
 
     @staticmethod
-    def update_rule(
-        db: Session, rule_id: uuid.UUID, data: FraudRuleUpdate, updated_by: User
+    async def update_rule(
+        db: AsyncSession, rule_id: uuid.UUID, data: FraudRuleUpdate, updated_by: UserResponse
     ) -> FraudRuleResponse:
-        rule = db.query(FraudRule).filter(FraudRule.id == rule_id).first()
+        result = await db.execute(select(FraudRule).filter(FraudRule.id == rule_id))
+        rule = result.scalars().first()
         if not rule:
             raise HTTPException(status_code=404, detail="Rule not found")
 
         for field, value in data.model_dump(exclude_none=True).items():
             setattr(rule, field, value)
-        db.commit()
-        db.refresh(rule)
+        await db.commit()
+        await db.refresh(rule)
 
-        AuditService.log(
+        await AuditService.log(
             db,
             AuditAction.RULE_UPDATED,
             user_id=updated_by.id,
@@ -114,17 +121,18 @@ class RuleService:
         return FraudRuleResponse.model_validate(rule)
 
     @staticmethod
-    def toggle_rule(
-        db: Session, rule_id: uuid.UUID, toggled_by: User
+    async def toggle_rule(
+        db: AsyncSession, rule_id: uuid.UUID, toggled_by: UserResponse
     ) -> RuleToggleResponse:
-        rule = db.query(FraudRule).filter(FraudRule.id == rule_id).first()
+        result = await db.execute(select(FraudRule).filter(FraudRule.id == rule_id))
+        rule = result.scalars().first()
         if not rule:
             raise HTTPException(status_code=404, detail="Rule not found")
 
         rule.is_active = not rule.is_active
-        db.commit()
+        await db.commit()
 
-        AuditService.log(
+        await AuditService.log(
             db,
             AuditAction.RULE_TOGGLED,
             user_id=toggled_by.id,
@@ -148,24 +156,23 @@ class RuleService:
 class ModelService:
 
     @staticmethod
-    def register_model(
-        db: Session, data: ModelVersionCreate, registered_by: User
+    async def register_model(
+        db: AsyncSession, data: ModelVersionCreate, registered_by: UserResponse
     ) -> ModelVersionResponse:
-        if (
-            db.query(ModelVersion)
-            .filter(ModelVersion.version_name == data.version_name)
-            .first()
-        ):
+        result = await db.execute(
+            select(ModelVersion).filter(ModelVersion.version_name == data.version_name)
+        )
+        if result.scalars().first():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Model version '{data.version_name}' already registered",
             )
         model = ModelVersion(**data.model_dump())
         db.add(model)
-        db.commit()
-        db.refresh(model)
+        await db.commit()
+        await db.refresh(model)
 
-        AuditService.log(
+        await AuditService.log(
             db,
             AuditAction.MODEL_REGISTERED,
             user_id=registered_by.id,
@@ -179,35 +186,42 @@ class ModelService:
         return ModelVersionResponse.model_validate(model)
 
     @staticmethod
-    def list_models(db: Session) -> List[ModelVersionResponse]:
-        models = db.query(ModelVersion).order_by(ModelVersion.created_at.desc()).all()
+    async def list_models(db: AsyncSession) -> List[ModelVersionResponse]:
+        result = await db.execute(select(ModelVersion).order_by(ModelVersion.created_at.desc()))
+        models = result.scalars().all()
         return [ModelVersionResponse.model_validate(m) for m in models]
 
     @staticmethod
-    def get_model(db: Session, model_id: uuid.UUID) -> ModelVersionResponse:
-        model = db.query(ModelVersion).filter(ModelVersion.id == model_id).first()
+    async def get_model(db: AsyncSession, model_id: uuid.UUID) -> ModelVersionResponse:
+        result = await db.execute(select(ModelVersion).filter(ModelVersion.id == model_id))
+        model = result.scalars().first()
         if not model:
             raise HTTPException(status_code=404, detail="Model version not found")
         return ModelVersionResponse.model_validate(model)
 
     @staticmethod
-    def deploy_model(
-        db: Session, model_id: uuid.UUID, deployed_by: User
+    async def deploy_model(
+        db: AsyncSession, model_id: uuid.UUID, deployed_by: UserResponse
     ) -> ModelDeployResponse:
-        target = db.query(ModelVersion).filter(ModelVersion.id == model_id).first()
+        result = await db.execute(select(ModelVersion).filter(ModelVersion.id == model_id))
+        target = result.scalars().first()
         if not target:
             raise HTTPException(status_code=404, detail="Model version not found")
 
         # ── 1. Update DB: deactivate all others, activate this one ────────────
-        db.query(ModelVersion).filter(
-            ModelVersion.id != model_id,
-            ModelVersion.is_deployed == True,
-        ).update({"is_deployed": False})
+        active_models_result = await db.execute(
+            select(ModelVersion).filter(
+                ModelVersion.id != model_id,
+                ModelVersion.is_deployed == True,
+            )
+        )
+        for old_model in active_models_result.scalars().all():
+            old_model.is_deployed = False
 
         target.is_deployed = True
         target.deployed_at = datetime.utcnow()
         target.deployed_by = deployed_by.id
-        db.commit()
+        await db.commit()
 
         # ── 2. Hot-swap the in-memory model ───────────────────────────────────
         # This is the key change: after persisting the DB record we immediately
@@ -239,7 +253,7 @@ class ModelService:
                 f"hot-swap skipped. Set model_artifact_path when registering."
             )
 
-        AuditService.log(
+        await AuditService.log(
             db,
             AuditAction.MODEL_DEPLOYED,
             user_id=deployed_by.id,
