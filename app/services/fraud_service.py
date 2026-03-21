@@ -265,6 +265,16 @@ class FraudService:
         # ── Step 6: Determine risk level ──────────────────────────────────────
         risk_level = self._determine_risk_level(final_score)
 
+        from app.models.enums_model import ClaimStatus
+
+        if risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            if claim.sha_status not in (
+                ClaimStatus.APPROVED,
+                ClaimStatus.REJECTED,
+                ClaimStatus.PAID,
+            ):
+                claim.sha_status = ClaimStatus.FLAGGED
+
         # ── Step 7: Persist FraudScore ────────────────────────────────────────
         fraud_score = FraudScore(
             claim_id=claim.id,
