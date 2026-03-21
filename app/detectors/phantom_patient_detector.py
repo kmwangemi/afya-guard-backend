@@ -52,7 +52,7 @@ class PhantomPatientDetector(BaseDetector):
             member.coverage_status
             and member.coverage_status.upper() in self.INACTIVE_STATUSES
         ):
-            score += 60.0
+            score += 100.0
             flags.append(f"Coverage is {member.coverage_status}")
         # ── National ID missing ───────────────────────────────────────────────
         if not member.national_id:

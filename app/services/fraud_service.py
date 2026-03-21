@@ -330,13 +330,19 @@ class FraudService:
 
                 # Per-feature breakdown from explain()
                 for feat_name, feat_weight in explain_map.items():
+                    safe_weight = float(feat_weight)
+                    if safe_weight > 9999.0:
+                        safe_weight = 9999.0
+                    elif safe_weight < -9999.0:
+                        safe_weight = -9999.0
+
                     all_explanations.append(
                         FraudExplanation(
                             fraud_score_id=fraud_score.id,
                             explanation=f"{result.detector_name} feature: {feat_name}",
                             feature_name=feat_name,
                             feature_value=str(feat_weight),
-                            weight=float(feat_weight),
+                            weight=safe_weight,
                             source=result.detector_name,
                         )
                     )

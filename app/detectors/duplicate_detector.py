@@ -212,8 +212,9 @@ class DuplicateDetector(BaseDetector):
 
         cutoff = claim.submitted_at - timedelta(days=LOOKBACK_DAYS)
 
+        from sqlalchemy.orm import selectinload
         result = await self.db.execute(
-            select(Claim).filter(
+            select(Claim).options(selectinload(Claim.services)).filter(
                 Claim.member_id == claim.member_id,
                 Claim.id != claim.id,
                 Claim.submitted_at >= cutoff,

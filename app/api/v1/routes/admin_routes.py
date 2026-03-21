@@ -49,7 +49,7 @@ router = APIRouter(tags=["Admin & Integration"])
 )
 async def list_rules(
     active_only: bool = False,
-    category: str = None,
+    category: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: UserResponse = Depends(require_permission("manage_rules")),
 ):
@@ -211,7 +211,7 @@ async def analytics_summary(
             FraudCase.estimated_loss.isnot(None),
         )
     )
-    savings = sum(float(v) for v in savings_result.scalars().all())
+    savings = sum(float(v) for v in savings_result.scalars().all() if v is not None)
     return AnalyticsSummary(
         total_claims=total_claims,
         total_scored=total_scored,
